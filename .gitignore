@@ -1,0 +1,24 @@
+# Secrets and key material: never commit
+*.jks
+*.keystore
+*.p12
+*.pem
+*.key
+*.asc
+secrets/
+local.properties
+.env
+.env.*
+
+# Build output and IDE
+build/
+.gradle/
+.idea/
+*.iml
+*.apk
+*.aab
+captures/
+
+# Test logs that may contain device data
+spike-logs/
+*.log
