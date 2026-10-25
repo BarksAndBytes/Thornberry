@@ -29,5 +29,5 @@ jobs:
       - name: Report results as annotations
         if: always()
         run: |
-          out=$(grep -E "PASSED|FAILED|^e: |What went wrong|Could not resolve|AssertionFailedError|expected:" test.log | head -n 30 | cut -c1-300)
+          out=$( (grep -E " FAILED$" -A 8 test.log; grep -E "PASSED|^e: |What went wrong|Could not resolve" test.log) | head -n 60 | cut -c1-300)
           echo "::notice title=core-test-results::${out//$'\n'/%0A}"
