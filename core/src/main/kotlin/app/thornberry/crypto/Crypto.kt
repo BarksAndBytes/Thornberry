@@ -3,6 +3,7 @@ package app.thornberry.crypto
 import org.bouncycastle.crypto.agreement.X25519Agreement
 import org.bouncycastle.crypto.digests.SHA256Digest
 import org.bouncycastle.crypto.generators.HKDFBytesGenerator
+import org.bouncycastle.crypto.macs.HMac
 import org.bouncycastle.crypto.modes.XChaCha20Poly1305
 import org.bouncycastle.crypto.params.AEADParameters
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters
@@ -85,6 +86,14 @@ object Crypto {
         val g = HKDFBytesGenerator(SHA256Digest())
         g.init(HKDFParameters(ikm, salt, info))
         return ByteArray(length).also { g.generateBytes(it, 0, length) }
+    }
+
+    // ---- HMAC-SHA256 (RFC 2104 / 4231) ----
+    fun hmacSha256(key: ByteArray, data: ByteArray): ByteArray {
+        val m = HMac(SHA256Digest())
+        m.init(KeyParameter(key))
+        m.update(data, 0, data.size)
+        return ByteArray(m.macSize).also { m.doFinal(it, 0) }
     }
 
     // ---- XChaCha20-Poly1305 AEAD ----
