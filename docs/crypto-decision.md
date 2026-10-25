@@ -1,6 +1,6 @@
 # Decision D2: crypto libraries and message-layer approach
 
-Status: PROPOSED 2026-10-25, awaiting the owner's approval. Independent review (D3) is still required before location sharing ships. Nothing here has been implemented.
+Status: APPROVED by the owner 2026-10-25. Wrapper and known-answer tests implemented (commit after a0e0892); all pass in CI. Independent review (D3) is still required before location sharing ships. Nothing here has been implemented.
 
 ## What the design needs
 1. Pairwise sessions set up in person (QR code), so mutual authentication comes from the pairing, not a server.

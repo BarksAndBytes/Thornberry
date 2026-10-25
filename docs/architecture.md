@@ -80,7 +80,7 @@ The spike should start with the first two, since we need to host an onion servic
 | ID | Question | Needed by |
 |----|----------|-----------|
 | D1 | Is the 10-minute target achievable with Tor on Android background limits? | End of M0 spike |
-| D2 | Which Tor-on-Android and crypto libraries? Tor: Onion Wrapper (used in the spike). Crypto: PROPOSED Bouncy Castle lightweight API behind a thin wrapper, own message layer, no libsignal; see crypto-decision.md. Awaiting owner approval. | Start of M1 |
+| D2 | Which Tor-on-Android and crypto libraries? Tor: Onion Wrapper (used in the spike). Crypto: APPROVED Bouncy Castle lightweight API behind a thin wrapper, own message layer, no libsignal; see crypto-decision.md. APPROVED 2026-10-25; wrapper and known-answer tests pass. | Start of M1 |
 | D3 | Independent review of key rotation and the handshake before location ships | End of M1 |
 | D4 | External audit before any public release | Before release |
 | D5 | Who can be a group admin, and can a non-admin trigger a rotation? | M3 |
