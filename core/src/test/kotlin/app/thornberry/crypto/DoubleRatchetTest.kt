@@ -141,27 +141,29 @@ class DoubleRatchetTest {
             val inbox = arrayOf(ArrayList<Pair<String, ByteArray>>(), ArrayList())
             val delivered = HashSet<String>()
             var bobCanSend = false
-            repeat(150) { step ->
-                val who = if (bobCanSend) r.nextInt(2) else 0
+            repeat(300) { step ->
                 if (r.nextInt(3) > 0) {
+                    val who = if (bobCanSend) r.nextInt(2) else 0
                     val text = "r$round-s$step-from$who"
                     inbox[1 - who].add(text to side[who].encrypt(b(text), ad))
-                } else if (inbox[who].isNotEmpty()) {
-                    val (text, m) = inbox[who].removeAt(r.nextInt(inbox[who].size))
-                    if (r.nextInt(6) == 0) continue_(inbox[who], text, m) // duplicate copy
-                    if (r.nextInt(5) != 0) { // else: dropped
-                        if (delivered.add(text)) {
-                            assertContentEquals(b(text), side[who].decrypt(m, ad))
-                            if (who == 1 || true) bobCanSend = bobCanSend || who == 1
-                        } else {
-                            assertFailsWith<CryptoException> { side[who].decrypt(m, ad) }
+                } else {
+                    val rx = r.nextInt(2) // receiver
+                    if (inbox[rx].isNotEmpty()) {
+                        val (text, m) = inbox[rx].removeAt(r.nextInt(inbox[rx].size))
+                        if (r.nextInt(6) == 0) inbox[rx].add(text to m) // a duplicate stays in the network
+                        if (r.nextInt(5) != 0) { // otherwise the copy is dropped
+                            if (delivered.add(text)) {
+                                assertContentEquals(b(text), side[rx].decrypt(m, ad))
+                                if (rx == 1) bobCanSend = true
+                            } else {
+                                assertFailsWith<CryptoException> { side[rx].decrypt(m, ad) }
+                            }
                         }
                     }
                 }
             }
-            assertEquals(true, delivered.isNotEmpty())
+            assertEquals(true, bobCanSend)
         }
     }
 
-    private fun continue_(box: ArrayList<Pair<String, ByteArray>>, t: String, m: ByteArray) { box.add(t to m) }
 }
