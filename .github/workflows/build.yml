@@ -32,7 +32,23 @@ jobs:
           gradle-version: "8.10.2"
 
       - name: Build debug APK
-        run: gradle --no-daemon assembleDebug
+        run: |
+          set -o pipefail
+          gradle --no-daemon assembleDebug 2>&1 | tee build.log
+
+      # Build logs cannot be downloaded from some environments, so surface the
+      # important lines as annotations (readable through the REST API).
+      - name: Report build errors as annotations
+        if: failure()
+        run: |
+          out=$(grep -E "^e: |error:|What went wrong|Could not resolve|FAILED|Execution failed|> " build.log | head -n 25 | cut -c1-300)
+          echo "::error title=build-errors::${out//$'\n'/%0A}"
+
+      - name: List native libraries packaged in the APK
+        run: |
+          out=$(unzip -l app/build/outputs/apk/debug/app-debug.apk | grep -E "\.so$|\.apk$|Archive" | awk '{print $1, $4}')
+          size=$(ls -l app/build/outputs/apk/debug/app-debug.apk | awk '{print $5}')
+          echo "::notice title=apk-native-libs::APK bytes: $size%0A${out//$'\n'/%0A}"
 
       - name: Upload APK as build artifact
         uses: actions/upload-artifact@v4
