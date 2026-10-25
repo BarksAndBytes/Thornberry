@@ -1,0 +1,30 @@
+# One-off discovery: print which versions of the Tor-related Maven artifacts exist and what the
+# Tor Android package contains. Read-only; builds nothing; publishes nothing.
+name: discover-libs
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Maven Central metadata
+        run: |
+          for a in tor-android lyrebird-android onionwrapper-android onionwrapper-core dont-kill-me-lib null-safety jtorctl; do
+            echo "=== org.briarproject:$a"
+            curl -fsS "https://repo1.maven.org/maven2/org/briarproject/$a/maven-metadata.xml" \
+              | grep -E "<(latest|release|version)>" | tr -d ' \n' | sed 's/<\/version>/ /g; s/<version>//g'
+            echo
+          done
+      - name: Inspect tor-android package contents
+        run: |
+          v=$(curl -fsS "https://repo1.maven.org/maven2/org/briarproject/tor-android/maven-metadata.xml" | grep -o "<release>[^<]*" | sed 's/<release>//')
+          echo "tor-android release: $v"
+          curl -fsSL -o tor.aar "https://repo1.maven.org/maven2/org/briarproject/tor-android/$v/tor-android-$v.aar" || curl -fsSL -o tor.aar "https://repo1.maven.org/maven2/org/briarproject/tor-android/$v/tor-android-$v.jar"
+          ls -l tor.aar
+          unzip -l tor.aar | head -30
