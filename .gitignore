@@ -22,3 +22,7 @@ captures/
 # Test logs that may contain device data
 spike-logs/
 *.log
+
+# Exception: the public, non-secret TEST signing key for spike builds (see docs/spike-run-guide.md).
+# Never use it for anything real.
+!app/spike-test.keystore

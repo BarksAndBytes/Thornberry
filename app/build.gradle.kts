@@ -44,6 +44,17 @@ android {
 
     sourceSets["main"].jniLibs.srcDir(torJniDir)
 
+    // A fixed, PUBLIC test key so updates install over each other and keep app data.
+    // It has no security value. Real releases will use a private key that is never committed.
+    signingConfigs {
+        create("spikeTest") {
+            storeFile = file("spike-test.keystore")
+            storePassword = "android"
+            keyAlias = "spiketest"
+            keyPassword = "android"
+        }
+    }
+
     packaging {
         jniLibs {
             // Required so libtor.so is extracted at install time and can be executed.
@@ -53,6 +64,9 @@ android {
     }
 
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("spikeTest")
+        }
         release {
             isMinifyEnabled = false
         }
