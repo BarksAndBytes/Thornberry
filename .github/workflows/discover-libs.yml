@@ -1,4 +1,4 @@
-# One-off discovery: report latest versions and declared licenses of candidate Maven artifacts.
+# One-off discovery: list which crypto classes exist inside candidate libraries.
 # Read-only; builds nothing; publishes nothing. Results are emitted as annotations.
 name: discover-libs
 
@@ -13,26 +13,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Latest versions and licenses
+      - name: Tink classes
         run: |
-          out=""
-          for ga in \
-            org.signal:libsignal-client \
-            org.signal:libsignal-android \
-            org.bouncycastle:bcprov-jdk18on \
-            com.google.crypto.tink:tink-android \
-            com.google.crypto.tink:tink \
-            com.goterl:lazysodium-android \
-            com.goterl:lazysodium-java \
-            com.rweather:noise-java \
-            org.whispersystems:signal-protocol-java; do
-            g=${ga%%:*}; a=${ga##*:}; gp=${g//./\/}
-            meta=$(curl -fsS "https://repo1.maven.org/maven2/$gp/$a/maven-metadata.xml" 2>/dev/null) || { out="$out$ga: NOT FOUND"$'\n'; continue; }
-            rel=$(echo "$meta" | grep -o "<release>[^<]*" | sed 's/<release>//')
-            [ -z "$rel" ] && rel=$(echo "$meta" | grep -o "<latest>[^<]*" | sed 's/<latest>//')
-            [ -z "$rel" ] && rel=$(echo "$meta" | grep -o "<version>[^<]*" | tail -1 | sed 's/<version>//')
-            lic=$(curl -fsS "https://repo1.maven.org/maven2/$gp/$a/$rel/$a-$rel.pom" 2>/dev/null | tr -d '\n' | grep -o "<licenses>.*</licenses>" | sed -E 's/<\/?[a-z]+>/ /g; s/  +/ /g' | cut -c1-160)
-            last=$(echo "$meta" | grep -o "<lastUpdated>[^<]*" | sed 's/<lastUpdated>//')
-            out="$out$ga: release=$rel updated=$last license=[$lic]"$'\n'
-          done
-          echo "::notice title=crypto-candidates::${out//$'\n'/%0A}"
+          v=1.24.0
+          curl -fsSL -o tink.aar "https://repo1.maven.org/maven2/com/google/crypto/tink/tink-android/$v/tink-android-$v.aar" \
+            || curl -fsSL -o tink.aar "https://repo1.maven.org/maven2/com/google/crypto/tink/tink-android/$v/tink-android-$v.jar"
+          mkdir t && cd t && unzip -q ../tink.aar && ls
+          jar=$( [ -f classes.jar ] && echo classes.jar || echo ../tink.aar )
+          out=$(unzip -l $jar | awk '{print $4}' | grep -E "subtle/(X25519|Ed25519|Hkdf|XChaCha20Poly1305|ChaCha20Poly1305|Random|EngineFactory)\.class|hybrid/HpkeConfig|signature/Ed25519" | sed 's#com/google/crypto/tink/##' | head -30)
+          echo "::notice title=tink-classes::${out//$'\n'/%0A}"
+      - name: Bouncy Castle classes
+        run: |
+          v=1.86
+          curl -fsSL -o bc.jar "https://repo1.maven.org/maven2/org/bouncycastle/bcprov-jdk18on/$v/bcprov-jdk18on-$v.jar"
+          ls -l bc.jar | awk '{print "bytes", $5}'
+          out=$(unzip -l bc.jar | awk '{print $4}' | grep -E "crypto/(agreement/X25519Agreement|signers/Ed25519Signer|modes/ChaCha20Poly1305|generators/HKDFBytesGenerator|digests/Blake2bDigest|engines/XChaCha20|modes/XChaCha)" | sed 's#org/bouncycastle/##' | head -30)
+          echo "::notice title=bc-classes::bytes $(stat -c %s bc.jar)%0A${out//$'\n'/%0A}"
