@@ -11,7 +11,7 @@ Status: design proposal, not implemented, not reviewed. Primitive choices are pr
 ## Components
 1. **Identity**: each person has a long-term signing key pair (Ed25519 proposed) and a key-agreement key pair (X25519 proposed).
 2. **Contact pairing**: in person via QR code containing public keys, a per-contact onion address, and a random pairing secret. Both phones show a short verification code to compare. No server involved.
-3. **Transport**: an authenticated, encrypted channel between two paired phones, carried over Tor onion services (one onion address per contact) and optionally Wi-Fi or Bluetooth when nearby. A Noise-framework handshake with the paired static keys is proposed, giving mutual authentication and forward secrecy. Records are length-prefixed, padded to fixed size classes, and capped at a maximum size.
+3. **Transport and message layer** (revised 2026-10-25, see crypto-decision.md, proposed): phones connect over Tor onion services (one onion address per contact), optionally Wi-Fi or Bluetooth when nearby. Tor authenticates the onion service endpoint; it does not tell the listener who is connecting, so every message is authenticated by the end-to-end message layer and anything that does not authenticate is dropped before processing. Pairwise sessions use the published Double Ratchet algorithm started from keys exchanged in the QR pairing, which works for store-and-forward delivery. The earlier idea of a Noise handshake over Tor is dropped. Records are length-prefixed, padded to fixed size classes, and capped at a maximum size.
 4. **Sync**: store-and-forward of small immutable records grouped by group. Peers exchange what they have, what they offer, and what they want (summaries first, then bodies). Dependency ordering is only required for chat; location records are independent and last-writer-wins per sender.
 5. **Groups**: a group has an admin set, a member list, and a current **key epoch**.
 6. **Location records**: see below.
@@ -80,7 +80,7 @@ The spike should start with the first two, since we need to host an onion servic
 | ID | Question | Needed by |
 |----|----------|-----------|
 | D1 | Is the 10-minute target achievable with Tor on Android background limits? | End of M0 spike |
-| D2 | Which Tor-on-Android and crypto libraries (must be maintained, licensed compatibly, buildable offline-reproducibly)? | Start of M1 |
+| D2 | Which Tor-on-Android and crypto libraries? Tor: Onion Wrapper (used in the spike). Crypto: PROPOSED Bouncy Castle lightweight API behind a thin wrapper, own message layer, no libsignal; see crypto-decision.md. Awaiting owner approval. | Start of M1 |
 | D3 | Independent review of key rotation and the handshake before location ships | End of M1 |
 | D4 | External audit before any public release | Before release |
 | D5 | Who can be a group admin, and can a non-admin trigger a rotation? | M3 |
