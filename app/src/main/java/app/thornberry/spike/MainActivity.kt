@@ -63,17 +63,18 @@ class MainActivity : Activity() {
         }
 
         col.addView(label("Thornberry spike (test build)", 20f, true))
-        col.addView(label("Version 0.0.2-spike. Test data only. Not for real use.", 12f))
+        col.addView(label("Version 0.0.3-spike. Test data only. Not for real use.", 12f))
 
         status = label("", 13f).apply { typeface = Typeface.MONOSPACE; setPadding(0, dp(8), 0, dp(8)) }
         col.addView(status)
 
         val row1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        row1.addView(button("Start") { startSpike() })
+        row1.addView(button("Start (Tor on)") { startSpike(baseline = false) })
         row1.addView(button("Stop") {
             startService(Intent(this, SpikeService::class.java).setAction(SpikeService.ACTION_STOP))
         })
         col.addView(row1)
+        col.addView(button("Start baseline (Tor OFF, battery logging only)") { startSpike(baseline = true) })
 
         col.addView(button("Copy my onion address") {
             val addr = SpikeState.onion
@@ -161,13 +162,15 @@ class MainActivity : Activity() {
         super.onPause()
     }
 
-    private fun startSpike() {
+    private fun startSpike(baseline: Boolean) {
         if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
-        startForegroundService(Intent(this, SpikeService::class.java))
+        startForegroundService(
+            Intent(this, SpikeService::class.java).putExtra(SpikeService.EXTRA_BASELINE, baseline),
+        )
     }
 
     private fun requestBatteryExemption() {
@@ -183,7 +186,8 @@ class MainActivity : Activity() {
     private fun buildStatus(): String {
         val onion = SpikeState.onion
         return buildString {
-            append("Service: ").append(if (SpikeState.serviceRunning) "running" else "stopped").append('\n')
+            append("Service: ").append(if (SpikeState.serviceRunning) "running" else "stopped")
+            append(" (mode ").append(SpikeState.mode).append(")\n")
             append("Tor: ").append(SpikeState.torState).append(" (bootstrap ").append(SpikeState.bootstrap).append("%)\n")
             append("Last ping: ").append(SpikeState.lastPing).append('\n')
             append("My address: ").append(if (onion.isEmpty()) "(not published)" else onion)

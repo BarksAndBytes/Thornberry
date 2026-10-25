@@ -5,9 +5,13 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Handler
@@ -42,6 +46,7 @@ class SpikeService : Service() {
 
     companion object {
         const val ACTION_STOP = "app.thornberry.spike.STOP"
+        const val EXTRA_BASELINE = "baseline"
         private const val CHANNEL_ID = "spike"
         private const val NOTIFICATION_ID = 1
         private const val ONION_PORT = 80
@@ -57,6 +62,8 @@ class SpikeService : Service() {
     @Volatile private var server: ServerSocket? = null
     @Volatile private var socksPort = 0
     @Volatile private var running = false
+    @Volatile private var baselineMode = false
+    private var screenReceiver: BroadcastReceiver? = null
     private var started = false
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -73,12 +80,23 @@ class SpikeService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        startInForeground("Starting")
+        val prefs = getSharedPreferences("spike", MODE_PRIVATE)
+        // A restart by the system delivers a null intent: keep the previous mode.
+        val baseline = if (intent == null) {
+            prefs.getBoolean("baseline", false)
+        } else {
+            intent.getBooleanExtra(EXTRA_BASELINE, false)
+        }
+        prefs.edit().putBoolean("baseline", baseline).apply()
+        startInForeground(if (baseline) "Baseline (Tor off)" else "Starting")
         if (!started) {
             started = true
             running = true
+            baselineMode = baseline
             SpikeState.serviceRunning = true
-            SpikeLog.event("SERVICE_START", "restart=${intent == null}")
+            SpikeState.mode = if (baseline) "baseline" else "tor"
+            SpikeLog.event("SERVICE_START", "restart=${intent == null} mode=${SpikeState.mode}")
+            registerScreenReceiver()
             io.execute { runSpike() }
         }
         return START_STICKY
@@ -93,6 +111,12 @@ class SpikeService : Service() {
 
     private fun runSpike() {
         try {
+            if (baselineMode) {
+                // Control run: no Tor, no network traffic; only battery and screen logging.
+                SpikeState.torState = "OFF (baseline)"
+                scheduler.scheduleWithFixedDelay({ sampleBattery() }, 0, 5, TimeUnit.MINUTES)
+                return
+            }
             val app = application
             val wakeLocks = AndroidWakeLockManagerFactory.createAndroidWakeLockManager(app)
             // Both copies of the app on one phone share loopback, so each needs its own ports.
@@ -244,16 +268,49 @@ class SpikeService : Service() {
         try {
             val bm = getSystemService(BatteryManager::class.java)
             val level = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+            // Remaining charge in microamp-hours: finer than whole percent points.
+            val uah = bm.getLongProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER)
             val sticky = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
             val plugged = sticky?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0
             val pm = getSystemService(PowerManager::class.java)
+            val cm = getSystemService(ConnectivityManager::class.java)
+            val caps = cm.getNetworkCapabilities(cm.activeNetwork)
+            val net = when {
+                caps == null -> "none"
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cell"
+                else -> "other"
+            }
             SpikeLog.event(
                 "BATTERY",
-                "level=$level plugged=$plugged doze=${pm.isDeviceIdleMode} ignoreOpt=${pm.isIgnoringBatteryOptimizations(packageName)}",
+                "level=$level uah=$uah plugged=$plugged doze=${pm.isDeviceIdleMode} " +
+                    "ignoreOpt=${pm.isIgnoringBatteryOptimizations(packageName)} " +
+                    "screen=${pm.isInteractive} mode=${SpikeState.mode} net=$net",
             )
         } catch (e: Exception) {
             SpikeLog.event("ERROR", "where=battery err=${e.javaClass.simpleName}")
         }
+    }
+
+    private fun registerScreenReceiver() {
+        val r = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                val on = intent?.action == Intent.ACTION_SCREEN_ON
+                SpikeLog.event("SCREEN", "state=${if (on) "on" else "off"}")
+            }
+        }
+        val f = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_SCREEN_OFF)
+        }
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(r, f, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(r, f)
+        }
+        screenReceiver = r
+        val pm = getSystemService(PowerManager::class.java)
+        SpikeLog.event("SCREEN", "state=${if (pm.isInteractive) "on" else "off"}")
     }
 
     private fun shutdown() {
@@ -261,6 +318,11 @@ class SpikeService : Service() {
         SpikeState.serviceRunning = false
         SpikeState.torState = "STOPPED"
         SpikeState.onion = ""
+        try {
+            screenReceiver?.let { unregisterReceiver(it) }
+        } catch (_: Exception) {
+        }
+        screenReceiver = null
         try {
             server?.close()
         } catch (_: Exception) {

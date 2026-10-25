@@ -52,6 +52,18 @@ After each run, open either copy and tap **Share summary and recent log**. Paste
 - Tor reconnects, service restarts after Android killed it
 - battery drop, Doze samples, and whether the battery exemption took effect
 
+## 7. Clean battery measurement (version 0.0.3 and later): the overnight pair
+Normal use hides the app's real cost. Two idle nights, same conditions, give a clean comparison:
+- **Night 1, Tor on:** both copies running (Start with Tor on), unplugged, screen off, Wi-Fi.
+- **Night 2, baseline:** only the ORIGINAL copy, started with **Start baseline (Tor OFF, battery logging only)**. Tor is off and the app makes no network traffic. Make sure the second copy is stopped.
+- Same room, same Wi-Fi, same starting battery level (aim for 70% or more), no charging, and don't touch the phone.
+- Tap **Clear log** in each copy just before going to bed, so each night's summary is clean. (The earlier results are already saved in the project.)
+- In the morning, tap **Share summary and recent log** in the original copy (and the second copy for the Tor night) and paste the results here.
+The summary then reports drain per hour for each mode and screen state, in battery points and in mAh. The app's cost is roughly the difference between the Tor night and the baseline night (divide by two for the cost of one copy, since two copies ran).
+
+## Updating the app mid-test
+Installing a new version stops the running app but keeps your log and address. Don't update during a run you care about. Between runs: tap **Stop** in both copies, install the new APK over the old one, open each copy, and tap **Start**.
+
 ## Reading the results
 - The one-way delay is exact because both copies share the phone's clock.
 - Battery drop includes both copies running Tor, so it overstates the cost of one. A later run with one copy talking to a server will give the clean number.

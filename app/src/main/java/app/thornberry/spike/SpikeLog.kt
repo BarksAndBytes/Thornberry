@@ -15,6 +15,7 @@ object SpikeState {
     @Volatile var bootstrap: Int = 0
     @Volatile var onion: String = ""
     @Volatile var serviceRunning: Boolean = false
+    @Volatile var mode: String = "tor"
     @Volatile var lastPing: String = "none yet"
 }
 
@@ -152,6 +153,67 @@ object SpikeLog {
             sb.append("samples ${bat.size}, samples while plugged in: ${bat.count { (it.kv["plugged"] ?: "0") != "0" }}, ")
             sb.append("samples in Doze: ${bat.count { it.kv["doze"] == "true" }}, ")
             sb.append("battery-optimization exempt: ${b1.kv["ignoreOpt"]}\n")
+
+            val nets = bat.groupingBy { it.kv["net"] ?: "?" }.eachCount()
+            sb.append("Network at samples: $nets\n")
+            sb.append(drainBreakdown(ev, bat))
+        }
+        return sb.toString()
+    }
+
+    /**
+     * Drain split by mode (tor or baseline) and screen state, using only intervals between two
+     * consecutive battery samples where the phone was unplugged, the mode did not change and the
+     * screen did not change state. The charge counter (mAh) is finer than the percent level.
+     */
+    private fun drainBreakdown(ev: List<Ev>, bat: List<Ev>): String {
+        val screenEv = ev.filter { it.type == "SCREEN" }
+        fun screenOnAt(t: Long, fallback: Boolean): Boolean {
+            val e = screenEv.lastOrNull { it.t <= t }
+            return if (e != null) e.kv["state"] == "on" else fallback
+        }
+        val minutes = HashMap<String, Double>()
+        val points = HashMap<String, Int>()
+        val microAh = HashMap<String, Long>()
+        val microAhMinutes = HashMap<String, Double>()
+        for (i in 1 until bat.size) {
+            val a = bat[i - 1]
+            val b = bat[i]
+            if ((a.kv["plugged"] ?: "0") != "0" || (b.kv["plugged"] ?: "0") != "0") continue
+            val mode = a.kv["mode"] ?: "tor"
+            if (mode != (b.kv["mode"] ?: "tor")) continue
+            if (screenEv.any { it.t > a.t && it.t <= b.t }) continue
+            val on = screenOnAt(a.t, a.kv["screen"] == "true")
+            val key = mode + "/" + (if (on) "screen-on" else "screen-off")
+            val la = a.kv["level"]?.toIntOrNull() ?: continue
+            val lb = b.kv["level"]?.toIntOrNull() ?: continue
+            if (lb > la) continue
+            val mins = (b.t - a.t) / 60_000.0
+            minutes[key] = (minutes[key] ?: 0.0) + mins
+            points[key] = (points[key] ?: 0) + (la - lb)
+            val ua = a.kv["uah"]?.toLongOrNull()
+            val ub = b.kv["uah"]?.toLongOrNull()
+            if (ua != null && ub != null && ua > 0 && ub > 0 && ua >= ub) {
+                microAh[key] = (microAh[key] ?: 0L) + (ua - ub)
+                microAhMinutes[key] = (microAhMinutes[key] ?: 0.0) + mins
+            }
+        }
+        if (minutes.isEmpty()) return "Drain breakdown: not enough unplugged intervals without a screen change yet.\n"
+        val sb = StringBuilder("Drain breakdown (unplugged, no screen change inside the interval):\n")
+        for (key in minutes.keys.sorted()) {
+            val m = minutes[key] ?: 0.0
+            if (m <= 0.0) continue
+            val pts = points[key] ?: 0
+            val pph = String.format(Locale.US, "%.2f", pts / m * 60.0)
+            sb.append("  $key: ${m.toInt()} min, $pts battery points ($pph points/h)")
+            val uah = microAh[key]
+            val uahMin = microAhMinutes[key]
+            if (uah != null && uahMin != null && uahMin > 0.0) {
+                val mah = uah / 1000.0
+                val mahPerHour = String.format(Locale.US, "%.1f", mah / uahMin * 60.0)
+                sb.append("; ${String.format(Locale.US, "%.0f", mah)} mAh ($mahPerHour mAh/h)")
+            }
+            sb.append('\n')
         }
         return sb.toString()
     }
