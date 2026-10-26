@@ -48,7 +48,7 @@ class MainActivity : Activity() {
     private var chatLog: TextView? = null
     private var chatScroll: ScrollView? = null
     private var pairName = "Contact"
-    private var pendingResult: ChatEngine.PairingResult? = null
+    private var confirmName: String? = null
     private val refresh: () -> Unit = { render(keepInput = true) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -80,7 +80,7 @@ class MainActivity : Activity() {
     override fun onBackPressed() {
         if (screen is Screen.Home) super.onBackPressed() else {
             if (screen is Screen.Pair) Node.cancelPairing()
-            pendingResult = null
+            Node.pendingPairing = null; confirmName = null
             go(Screen.Home)
         }
     }
@@ -93,6 +93,8 @@ class MainActivity : Activity() {
 
     private fun render(keepInput: Boolean = false) {
         if (screen is Screen.Chat && keepInput && chatLog != null) { updateChatLog(); return }
+        // A pairing finished (here, or by someone scanning our code): always show its safety code.
+        if (Node.pendingPairing != null && screen !is Screen.Pair) screen = Screen.Pair
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         root.removeAllViews(); root.addView(col)
         when (val s = screen) {
@@ -114,7 +116,7 @@ class MainActivity : Activity() {
     }
 
     private fun home(col: LinearLayout) {
-        col.addView(label("Thornberry (test build 0.1.1)", 22f, true))
+        col.addView(label("Thornberry (test build 0.1.2)", 22f, true))
         col.addView(label("Test data only. No server. Not independently reviewed.", 12f))
         Node.loadError?.let { col.addView(label(it, 14f, true)); return }
         col.addView(label(
@@ -149,24 +151,38 @@ class MainActivity : Activity() {
 
     private fun pair(col: LinearLayout) {
         col.addView(label("Pair in person", 20f, true))
-        val done = pendingResult
+        val done = Node.pendingPairing
         if (done != null) {
             col.addView(label("Safety code", 14f, true))
             col.addView(label(done.safetyCode, 32f, true, mono = true))
-            col.addView(label("Read this code out to ${done.contact.name}. Both phones must show the same code.", 14f))
+            col.addView(label(
+                "Read this code out to the other person and listen to theirs. BOTH phones must show exactly the same code. " +
+                    "If they differ, someone else may have used your code: tap the red button.", 14f,
+            ))
+            val nameBox = EditText(this).apply {
+                hint = "Name for this contact"; setText(confirmName ?: done.contact.name); isSingleLine = true
+                addTextChangedListener(object : android.text.TextWatcher {
+                    override fun afterTextChanged(s: android.text.Editable?) { confirmName = s.toString() }
+                    override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                    override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                })
+            }
+            col.addView(nameBox)
             col.addView(button("Codes match") {
-                Node.use { it.confirmVerified(done.contact.id) }
-                pendingResult = null; go(Screen.Home)
+                val n = (confirmName ?: done.contact.name).trim().ifEmpty { "Contact" }.take(40)
+                Node.use { it.renameContact(done.contact.id, n); it.confirmVerified(done.contact.id) }
+                Node.pendingPairing = null; confirmName = null; go(Screen.Home)
             })
             col.addView(button("Codes do NOT match: delete this contact") {
                 Node.use { it.removeContact(done.contact.id) }
-                pendingResult = null; go(Screen.Home)
+                Node.pendingPairing = null; confirmName = null; go(Screen.Home)
             })
             return
         }
         col.addView(label(
-            "1. Each of you shows your code and scans the other's.\n" +
-                "2. Then read the safety code out loud to confirm.\n" +
+            "1. Show your code. The other person scans it (or pastes it, in the test build). You only need ONE scan: " +
+                "your phone then shows the safety code by itself.\n" +
+                "2. Read the safety code out loud on both phones and confirm they match.\n" +
                 "Do not photograph or share the code: it contains secrets. This screen blocks screenshots.", 13f,
         ))
         val name = EditText(this).apply {
@@ -322,7 +338,7 @@ class MainActivity : Activity() {
         try {
             require(text.startsWith("thornberry1:")) { "not a Thornberry code" }
             val bytes = Base64.decode(text.removePrefix("thornberry1:"), Base64.URL_SAFE or Base64.NO_PADDING)
-            pendingResult = Node.finishPairing(bytes, pairName)
+            Node.finishPairing(bytes, pairName)
         } catch (e: Exception) {
             toast("Could not pair: ${e.message}")
         }

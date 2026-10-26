@@ -27,6 +27,8 @@ object Node {
     private var engine: ChatEngine? = null
     private val history = ArrayList<Msg>()
     private var pairingLocal: Pairing.Local? = null
+    /** A pairing that finished and still needs the people to compare the safety code. */
+    @Volatile var pendingPairing: ChatEngine.PairingResult? = null
 
     @Volatile var onion: String = ""
     @Volatile var torState: String = "STOPPED"
@@ -97,6 +99,11 @@ object Node {
                     is ChatEngine.Event.GroupJoined -> notifyHook?.invoke("You were added to a group")
                     is ChatEngine.Event.RemovedFromGroup -> notifyHook?.invoke("You were removed from a group")
                     is ChatEngine.Event.GroupChanged -> {}
+                    is ChatEngine.Event.Paired -> {
+                        e.contact(ev.contactId)?.let { pendingPairing = ChatEngine.PairingResult(it, ev.safetyCode) }
+                        pairingLocal = null
+                        notifyHook?.invoke("Someone paired with you: compare the safety code")
+                    }
                 }
             }
             trigger = e.pendingFrames().isNotEmpty()
@@ -169,10 +176,16 @@ object Node {
             val local = pairingLocal ?: throw IllegalStateException("no pairing in progress")
             use { it.completePairing(local, scanned, name) }.also { pairingLocal = null }
         }
+        pendingPairing = res
         return res
     }
 
-    fun cancelPairing() { synchronized(lock) { pairingLocal = null } }
+    fun cancelPairing() {
+        synchronized(lock) {
+            pairingLocal = null
+            engine?.cancelPairing()
+        }
+    }
 
     fun syncNow() { use { it.syncAll(System.currentTimeMillis()) } }
 }
