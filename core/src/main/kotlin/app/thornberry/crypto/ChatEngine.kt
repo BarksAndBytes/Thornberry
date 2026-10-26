@@ -51,6 +51,8 @@ class ChatEngine private constructor(
         class GroupJoined(val groupId: String, val groupName: String) : Event()
         class GroupChanged(val groupId: String) : Event()
         class RemovedFromGroup(val groupId: String) : Event()
+        /** Someone who scanned our pairing code has paired with us; show the safety code and ask to confirm. */
+        class Paired(val contactId: String, val safetyCode: String) : Event()
     }
 
     /** A frame to deliver to a contact's onion address. Keep until delivery succeeds. */
@@ -65,6 +67,7 @@ class ChatEngine private constructor(
     private val sync = SyncEngine(store)
     private val pending = ArrayList<Outgoing>()
     private val events = ArrayList<Event>()
+    private var activePairing: Pairing.Local? = null
     var droppedFrames = 0L
         private set
 
@@ -79,20 +82,47 @@ class ChatEngine private constructor(
 
     /** Frames waiting to be sent. They stay queued until [markDelivered] is called. */
     fun pendingFrames(): List<Outgoing> = pending.toList()
-    fun markDelivered(o: Outgoing) { pending.remove(o) }
+    fun markDelivered(o: Outgoing) {
+        pending.remove(o)
+        if (isResponseFrame(o.frame)) {
+            val c = contacts[o.contactId]
+            if (c != null && c.isInitiator) queue(c, TYPE_HELLO, ByteArray(0))
+        }
+    }
+
+    private fun isResponseFrame(f: ByteArray) = f.size > 16 && (0 until 16).all { f[it].toInt() == 0 }
 
     // ---------------- pairing ----------------
 
-    fun beginPairing(onion: String): Pairing.Local = Pairing.createOffer(identity, onion)
+    /** Our offer for the QR code. While it is active, a pairing response from whoever scanned it is accepted (once). */
+    fun beginPairing(onion: String): Pairing.Local = Pairing.createOffer(identity, onion).also { activePairing = it }
 
-    fun completePairing(local: Pairing.Local, scanned: ByteArray, name: String): PairingResult {
+    fun cancelPairing() { activePairing = null }
+
+    fun renameContact(contactId: String, name: String) { contacts[contactId]?.name = name }
+
+    /**
+     * Finish pairing after scanning (or pasting) the other phone's code. We then send our own offer to
+     * their onion address, so they do not need to scan ours: they get the same safety code and confirm it.
+     * Both people MUST compare the safety codes; that comparison is what catches a stranger who also saw the code.
+     */
+    fun completePairing(local: Pairing.Local, scanned: ByteArray, name: String): PairingResult =
+        completePairing(local, scanned, name, sendResponse = true)
+
+    private fun completePairing(local: Pairing.Local, scanned: ByteArray, name: String, sendResponse: Boolean): PairingResult {
         val r = Pairing.complete(local, scanned)
         val id = hex(r.peerIdentityPublic)
         if (contacts.containsKey(id)) throw CryptoException("already paired")
         val c = Contact(r.peerIdentityPublic, name, r.peerOnion, r.session, r.associatedData, r.sendTag, r.receiveTag, r.isInitiator, false)
         contacts[id] = c
         byTag[hex(r.receiveTag)] = id
-        if (c.isInitiator) queue(c, TYPE_HELLO, ByteArray(0)) // lets the other side start sending
+        if (activePairing === local) activePairing = null
+        if (sendResponse) {
+            // The response goes first; the hello (initiator only) follows once it is acknowledged.
+            pending.add(Outgoing(c.onion, c.id, ZERO_TAG + local.offer.encode()))
+        } else if (c.isInitiator) {
+            queue(c, TYPE_HELLO, ByteArray(0)) // lets the other side start sending
+        }
         return PairingResult(c, r.safetyCode)
     }
 
@@ -166,6 +196,7 @@ class ChatEngine private constructor(
     fun receiveFrame(frame: ByteArray, now: Long) {
         try {
             if (frame.size < 16 + DoubleRatchet.HEADER_BYTES) { droppedFrames++; return }
+            if (isResponseFrame(frame)) { onPairingResponse(frame.copyOfRange(16, frame.size)); return }
             val cid = byTag[hex(frame.copyOf(16))]
             val c = if (cid != null) contacts[cid] else null
             if (c == null) { droppedFrames++; return }
@@ -186,6 +217,17 @@ class ChatEngine private constructor(
             }
         } catch (e: Exception) {
             droppedFrames++
+        }
+    }
+
+    private fun onPairingResponse(offerBytes: ByteArray) {
+        val local = activePairing
+        if (local == null) { droppedFrames++; return } // nobody is showing a code right now
+        try {
+            val r = completePairing(local, offerBytes, "New contact", sendResponse = false)
+            events.add(Event.Paired(r.contact.id, r.safetyCode))
+        } catch (e: CryptoException) {
+            droppedFrames++ // bad offer or already paired: the code stays active
         }
     }
 
@@ -308,6 +350,7 @@ class ChatEngine private constructor(
         const val TYPE_SYNC = 3
         const val TYPE_HELLO = 4
         const val TYPE_GROUP_REMOVED = 5
+        private val ZERO_TAG = ByteArray(16)
         const val KIND_TEXT = 1
         private const val SNAPSHOT_VERSION = 1
 

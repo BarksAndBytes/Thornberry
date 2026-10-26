@@ -51,6 +51,48 @@ class ChatEngineTest {
 
     private inline fun <reified T : ChatEngine.Event> Phone.all() = events.filterIsInstance<T>()
 
+    @Test fun one_sided_pairing_only_one_phone_scans() {
+        repeat(8) { round -> // random identities, so both initiator orders are covered
+            val a = Phone("A", onions[0]); val b = Phone("B", onions[1]); val net = Net(listOf(a, b))
+            val la = a.engine.beginPairing(a.onion)
+            val lb = b.engine.beginPairing(b.onion) // B also shows a code but never scans A's
+            val rb = b.engine.completePairing(lb, la.offer.encode(), "Alice") // only B scans
+            net.run(now)
+            val paired = a.all<ChatEngine.Event.Paired>().single()
+            assertEquals(rb.safetyCode, paired.safetyCode, "round $round")
+            a.engine.renameContact(paired.contactId, "Bob")
+            a.engine.sendDirect(paired.contactId, "from A", now)
+            b.engine.sendDirect(rb.contact.id, "from B", now)
+            net.run(now)
+            assertEquals("from A", b.all<ChatEngine.Event.DirectText>().single().text)
+            assertEquals("from B", a.all<ChatEngine.Event.DirectText>().single().text)
+        }
+    }
+
+    @Test fun pairing_response_is_accepted_once_and_only_while_a_code_is_active() {
+        val a = Phone("A", onions[0]); val b = Phone("B", onions[1]); val m = Phone("M", onions[3])
+        val net = Net(listOf(a, b, m))
+        val la = a.engine.beginPairing(a.onion)
+        // A stranger who saw A's code responds first: A pairs with the stranger, B's code will then differ.
+        val lm = m.engine.beginPairing(m.onion)
+        val rm = m.engine.completePairing(lm, la.offer.encode(), "A"); net.run(now)
+        val first = a.all<ChatEngine.Event.Paired>().single()
+        assertEquals(rm.safetyCode, first.safetyCode)
+        val lb = b.engine.beginPairing(b.onion)
+        val rb = b.engine.completePairing(lb, la.offer.encode(), "A"); net.run(now)
+        assertEquals(1, a.all<ChatEngine.Event.Paired>().size) // second response was not accepted
+        assertTrue(rb.safetyCode != first.safetyCode) // the real B sees a different code: mismatch is detectable
+        assertEquals(1, a.engine.contactList().size)
+        // Without an active code, a response is dropped.
+        val c = Phone("C", onions[2]); val net2 = Net(listOf(a, c))
+        val lc = c.engine.beginPairing(c.onion)
+        c.engine.completePairing(lc, Pairing.createOffer(Crypto.ed25519Generate(), onions[0]).offer.encode(), "x")
+        val before = a.engine.droppedFrames
+        net2.run(now)
+        assertTrue(a.engine.droppedFrames >= before)
+        assertEquals(1, a.engine.contactList().size)
+    }
+
     @Test fun two_phones_pair_and_exchange_direct_messages() {
         val a = Phone("A", onions[0]); val b = Phone("B", onions[1]); val net = Net(listOf(a, b))
         pair(a, b, "Bob", "Alice")
