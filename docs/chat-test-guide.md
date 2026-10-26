@@ -32,3 +32,11 @@ Settings > Apps > Dual apps > turn on **Thornberry (test)**. Open the copy and d
 - Screenshots are blocked in this app on purpose (QR codes contain secrets).
 - Messages and keys are stored encrypted with a key held in the phone's Keystore. If you uninstall the app or clear its data, everything is lost permanently (no backup, by design).
 - Do not use this build for anything real: it has not been reviewed.
+
+## Location sharing test (version 0.2.0 and later)
+1. Open a group chat. Tap **Share my location: Off** and choose how precisely to share (Exact, About 100 m, About 1 km, City level). The first time, Android asks for location permission: choose **While using the app** (the app does not ask for or need "all the time"). A persistent notification then says the app is sharing location; it cannot be hidden.
+2. Do the same on the other copy (two copies on one phone report the same position, which is fine for checking that updates flow; real tests need two phones, or one person walking while the other watches).
+3. Tap **Where is everyone**. Each member shows coordinates, accuracy and how long ago. Positions shared at a coarse precision look rounded (for example About 1 km snaps to a 0.01 degree grid). "(old)" means older than 15 minutes; "sharing paused" means the person turned it off, which is different from lost signal.
+4. Tap a line to open that position in your map app (that app may contact its own servers; Thornberry itself has no map and sends nothing to any map service).
+5. Turn sharing Off on one copy: the other should show "sharing paused".
+6. What to report: whether updates appear, how often, whether the notification stays during screen-off, and any battery drop that looks too high. Save the diagnostic log (home screen) if something looks wrong; it records when location was sent, never where.

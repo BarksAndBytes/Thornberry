@@ -196,9 +196,10 @@ class ChatEngine private constructor(
 
     /**
      * Share our position with a group at the chosen precision. The reduction happens here, before
-     * encryption. Records expire after 24 hours; receivers delete them then.
+     * encryption. A location record in transit expires after 30 minutes (only the newest matters, and short
+     * life keeps relays from being filled with old positions); each receiver keeps its own 24 h trail.
      */
-    fun shareLocation(groupId: String, fix: LocationFix, precision: Precision, now: Long, ttlMs: Long = LocationBoard.TRAIL_MAX_MS) {
+    fun shareLocation(groupId: String, fix: LocationFix, precision: Precision, now: Long, ttlMs: Long = LOCATION_TTL_MS) {
         val g = groups[groupId] ?: throw CryptoException("unknown group")
         val body = LocationPayload.encode(fix, precision)
         val expires = now + ttlMs
@@ -401,6 +402,7 @@ class ChatEngine private constructor(
         const val TYPE_GROUP_REMOVED = 5
         private val ZERO_TAG = ByteArray(16)
         const val KIND_TEXT = 1
+        const val LOCATION_TTL_MS = 30L * 60_000
         private const val SNAPSHOT_VERSION = 2
 
         private fun hex(b: ByteArray) = b.joinToString("") { "%02x".format(it) }
