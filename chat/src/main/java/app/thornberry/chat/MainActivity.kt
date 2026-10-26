@@ -287,7 +287,7 @@ class MainActivity : Activity() {
 
     private fun membersDialog(groupId: String) {
         val rows = Node.read { e ->
-            val g = e.group(groupId) ?: return@use emptyList()
+            val g = e.group(groupId) ?: return@read emptyList()
             val names = e.contactList().associate { it.id to it.name }
             g.session.memberKeys().map { k ->
                 val hex = k.joinToString("") { "%02x".format(it) }

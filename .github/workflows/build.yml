@@ -41,7 +41,7 @@ jobs:
       - name: Report build errors as annotations
         if: failure()
         run: |
-          out=$(grep -E "^e: |error:|What went wrong|Could not resolve|FAILED|Execution failed|> " build.log | head -n 25 | cut -c1-300)
+          out=$(grep -E "^e: |error:|What went wrong|Could not resolve|FAILED|Execution failed" build.log | head -n 25 | cut -c1-300)
           echo "::error title=build-errors::${out//$'\n'/%0A}"
 
       - name: List native libraries packaged in the APK
