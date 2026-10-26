@@ -179,6 +179,12 @@ class GroupSession private constructor(
     fun isMember(identityPublic: ByteArray) = contains(members, identityPublic)
     fun isAdmin(identityPublic: ByteArray) = contains(admins, identityPublic)
 
+    /** We learned from an admin that we were removed: forget every secret of this group. */
+    fun markRemoved() {
+        key = ByteArray(32); prevKey = null; active = false
+        members = emptyList(); admins = emptyList()
+    }
+
     fun serialize(): ByteArray {
         val b = ByteArrayOutputStream()
         val o = DataOutputStream(b)

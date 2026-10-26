@@ -133,6 +133,9 @@ class ChatEngine private constructor(
         val g = groups[groupId] ?: throw CryptoException("unknown group")
         val update = g.session.removeMember(identity, memberIdentity, now)
         distribute(g, update) // new member list no longer contains the removed person
+        // Tell the removed person (never the new key), if we are paired with them.
+        contacts.values.firstOrNull { Crypto.constantTimeEquals(it.peerIdentity, memberIdentity) }
+            ?.let { queue(it, TYPE_GROUP_REMOVED, g.session.groupId.copyOf()) }
         events.add(Event.GroupChanged(g.id))
     }
 
@@ -178,6 +181,7 @@ class ChatEngine private constructor(
                 TYPE_TEXT -> onText(c, body)
                 TYPE_GROUP_UPDATE -> onGroupUpdate(c, body, now)
                 TYPE_SYNC -> onSync(c, body, now)
+                TYPE_GROUP_REMOVED -> onRemoved(c, body)
                 else -> droppedFrames++
             }
         } catch (e: Exception) {
@@ -217,6 +221,15 @@ class ChatEngine private constructor(
         } catch (e: CryptoException) {
             droppedFrames++
         }
+    }
+
+    private fun onRemoved(c: Contact, body: ByteArray) {
+        val g = groups[hex(body)]
+        // Only an admin of that group may tell us we were removed.
+        if (body.size != 16 || g == null || !g.session.isActive || !g.session.isAdmin(c.peerIdentity)) { droppedFrames++; return }
+        g.session.markRemoved()
+        syncPeers.clear()
+        events.add(Event.RemovedFromGroup(g.id))
     }
 
     private fun onSync(c: Contact, body: ByteArray, now: Long) {
@@ -294,6 +307,7 @@ class ChatEngine private constructor(
         const val TYPE_GROUP_UPDATE = 2
         const val TYPE_SYNC = 3
         const val TYPE_HELLO = 4
+        const val TYPE_GROUP_REMOVED = 5
         const val KIND_TEXT = 1
         private const val SNAPSHOT_VERSION = 1
 
