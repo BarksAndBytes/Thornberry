@@ -192,23 +192,40 @@ class MapView(ctx: Context) : View(ctx) {
             )
             val bmp = tiles.get(key)
             if (bmp != null) c.drawBitmap(bmp, null, r, null)
-            else if (torUp) request(tz, wrapped, ty, key)
+            else request(tz, wrapped, ty, key, torUp)
         }
     }
 
-    private fun request(z: Int, x: Int, y: Int, key: String) {
+    /** Memory cache first (in [onDraw]), then the encrypted disk cache, then Tor. Works without Tor for saved areas. */
+    private fun request(z: Int, x: Int, y: Int, key: String, torUp: Boolean) {
         val failed = failedAt[key]
         if (failed != null && System.currentTimeMillis() - failed < 30_000) return
         if (!inFlight.add(key)) return
         pool.execute {
             try {
-                val bytes = TileFetcher.fetch(Node.socksPort, z, x, y)
+                val useDisk = Node.mapCacheEnabled()
+                val cached = if (useDisk) TileCache.get(z, x, y) else null
+                val fresh = cached != null && System.currentTimeMillis() - cached.second < FRESH_MS
+                var bytes: ByteArray? = if (fresh) cached!!.first else null
+                if (bytes == null) {
+                    if (torUp) {
+                        try {
+                            bytes = TileFetcher.fetch(Node.socksPort, z, x, y)
+                            if (useDisk) TileCache.put(z, x, y, bytes)
+                        } catch (e: Exception) {
+                            if (cached == null) throw e
+                            bytes = cached.first // stale copy is better than a blank square
+                        }
+                    } else {
+                        bytes = cached?.first ?: throw IllegalStateException("not saved, tor not ready")
+                    }
+                }
                 val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: throw IllegalStateException("bad image")
                 tiles.put(key, bmp)
                 failedAt.remove(key)
             } catch (e: Exception) {
                 failedAt[key] = System.currentTimeMillis()
-                ChatLog.log("TILE_FAIL", e.javaClass.simpleName)
+                if (torUp) ChatLog.log("TILE_FAIL", e.javaClass.simpleName)
             } finally {
                 inFlight.remove(key)
                 postInvalidate()
@@ -261,7 +278,7 @@ class MapView(ctx: Context) : View(ctx) {
         c.drawText("© OpenStreetMap contributors", 6 * d, height - 6 * d, textPaint)
         if (Node.torState != "CONNECTED") {
             textPaint.textSize = 12 * d
-            c.drawText("Map tiles load through Tor. Waiting for Tor (${Node.torState.lowercase()})…", 8 * d, 18 * d, textPaint)
+            c.drawText("Waiting for Tor (${Node.torState.lowercase()}). Saved areas still show.", 8 * d, 18 * d, textPaint)
         } else if (inFlight.isNotEmpty()) {
             textPaint.textSize = 11 * d
             c.drawText("Loading map…", 8 * d, 18 * d, textPaint)
@@ -269,6 +286,8 @@ class MapView(ctx: Context) : View(ctx) {
     }
 
     companion object {
+        /** Saved tiles younger than this are used without asking the server (OSM asks clients to cache for a week or more). */
+        const val FRESH_MS = 14L * 24 * 3600 * 1000
         const val MIN_ZOOM = 2.0
         const val MAX_ZOOM = 17.99
     }

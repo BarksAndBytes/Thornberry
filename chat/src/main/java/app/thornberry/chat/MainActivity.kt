@@ -124,7 +124,7 @@ class MainActivity : Activity() {
     }
 
     private fun home(col: LinearLayout) {
-        col.addView(label("Thornberry (test build 0.3.0)", 22f, true))
+        col.addView(label("Thornberry (test build 0.3.1)", 22f, true))
         col.addView(label("Test data only. No server. Not independently reviewed.", 12f))
         Node.loadError?.let { col.addView(label(it, 14f, true)); return }
         col.addView(label(
@@ -303,6 +303,27 @@ class MainActivity : Activity() {
         col.addView(label(
             "This only hides your marker on YOUR screen. What you share with the group is set under \"Share my location\". " +
                 "Your own marker appears only while you are sharing with this group.", 11f,
+        ))
+        TileCache.init(applicationContext.filesDir)
+        val cacheLabel = label("", 12f)
+        fun updateCacheLabel() {
+            val mb = TileCache.sizeBytes() / 1024.0 / 1024.0
+            cacheLabel.text = "Saved map areas on this phone: %.1f MB (max %d MB)".format(Locale.US, mb, TileCache.MAX_BYTES / 1024 / 1024)
+        }
+        col.addView(android.widget.CheckBox(this).apply {
+            text = "Save map areas I view (encrypted) so they load faster and work offline"
+            isChecked = Node.mapCacheEnabled()
+            setOnCheckedChangeListener { _, v ->
+                Node.setMapCacheEnabled(v)
+                if (!v) { TileCache.clear(); updateCacheLabel() }
+            }
+        })
+        col.addView(cacheLabel)
+        updateCacheLabel()
+        col.addView(button("Clear saved map areas") { TileCache.clear(); updateCacheLabel(); toast("Cleared") })
+        col.addView(label(
+            "Only places you have already looked at are saved (no bulk download). Saved tiles are encrypted and cannot be " +
+                "listed by place, but they show how much you have viewed. Clearing destroys them.", 11f,
         ))
         val info = label("", 13f)
         mapInfo = info

@@ -223,5 +223,9 @@ object Node {
     fun mapShowMe(): Boolean = prefs.getBoolean("map_show_me", true)
     fun setMapShowMe(v: Boolean) { prefs.edit().putBoolean("map_show_me", v).apply() }
 
+    /** Whether viewed map tiles are saved (encrypted) on this phone. Default on. */
+    fun mapCacheEnabled(): Boolean = prefs.getBoolean("map_cache", true)
+    fun setMapCacheEnabled(v: Boolean) { prefs.edit().putBoolean("map_cache", v).apply() }
+
     fun syncNow() { use { it.syncAll(System.currentTimeMillis()) } }
 }
