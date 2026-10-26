@@ -41,7 +41,11 @@ class MainActivity : Activity() {
         object Home : Screen()
         object Pair : Screen()
         class Chat(val conv: String) : Screen()
+        class Map(val groupId: String) : Screen()
     }
+
+    private var mapView: MapView? = null
+    private var mapInfo: TextView? = null
 
     private var screen: Screen = Screen.Home
     private lateinit var root: ScrollView
@@ -78,6 +82,8 @@ class MainActivity : Activity() {
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
+        val cur = screen
+        if (cur is Screen.Map) { go(Screen.Chat("g:${cur.groupId}")); return }
         if (screen is Screen.Home) super.onBackPressed() else {
             if (screen is Screen.Pair) Node.cancelPairing()
             Node.pendingPairing = null; confirmName = null
@@ -85,7 +91,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun go(s: Screen) { screen = s; chatLog = null; render() }
+    private fun go(s: Screen) { screen = s; chatLog = null; mapView = null; mapInfo = null; render() }
 
     // ------------------------------------------------------------ rendering
 
@@ -93,6 +99,7 @@ class MainActivity : Activity() {
 
     private fun render(keepInput: Boolean = false) {
         if (screen is Screen.Chat && keepInput && chatLog != null) { updateChatLog(); return }
+        if (screen is Screen.Map && keepInput && mapView != null) { refreshMap(); return }
         // A pairing finished (here, or by someone scanning our code): always show its safety code.
         if (Node.pendingPairing != null && screen !is Screen.Pair) screen = Screen.Pair
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -101,6 +108,7 @@ class MainActivity : Activity() {
             is Screen.Home -> home(col)
             is Screen.Pair -> pair(col)
             is Screen.Chat -> chat(col, s.conv)
+            is Screen.Map -> mapScreen(col, s.groupId)
         }
     }
 
@@ -116,7 +124,7 @@ class MainActivity : Activity() {
     }
 
     private fun home(col: LinearLayout) {
-        col.addView(label("Thornberry (test build 0.2.1)", 22f, true))
+        col.addView(label("Thornberry (test build 0.3.0)", 22f, true))
         col.addView(label("Test data only. No server. Not independently reviewed.", 12f))
         Node.loadError?.let { col.addView(label(it, 14f, true)); return }
         col.addView(label(
@@ -238,7 +246,8 @@ class MainActivity : Activity() {
         }
         col.addView(label(title, 20f, true))
         if (isGroup) {
-            col.addView(button("Where is everyone") { whereDialog(id) })
+            col.addView(button("Map") { go(Screen.Map(id)) })
+            col.addView(button("Where is everyone (list)") { whereDialog(id) })
             col.addView(button("Share my location: " + (Node.sharePrecision(id)?.label ?: "Off")) { shareDialog(id) })
             col.addView(button("Members") { membersDialog(id) })
             col.addView(button("Invite a contact") { inviteDialog(id) })
@@ -264,6 +273,78 @@ class MainActivity : Activity() {
             } catch (e: Exception) { toast("Could not send: ${e.message}") }
         })
         updateChatLog()
+    }
+
+    // ------------------------------------------------------------ map
+
+    private fun mapScreen(col: LinearLayout, groupId: String) {
+        val title = Node.read { e -> e.group(groupId)?.name ?: "Group" }
+        col.addView(label("$title: map", 20f, true))
+        val mv = MapView(this)
+        mapView = mv
+        mv.onMarkerTap = { m ->
+            val ago = if (m.ageMin < 1) "just now" else if (m.ageMin < 60) "${m.ageMin} min ago" else "${m.ageMin / 60} h ago"
+            toast("${m.name}: ±${m.accuracyM} m, $ago")
+        }
+        col.addView(mv, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(440)))
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        fun rowBtn(t: String, f: () -> Unit) = row.addView(
+            button(t, f), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f),
+        )
+        rowBtn("+") { mv.zoomBy(1.0) }
+        rowBtn("−") { mv.zoomBy(-1.0) }
+        rowBtn("Show all") { mv.fit() }
+        col.addView(row)
+        col.addView(android.widget.CheckBox(this).apply {
+            text = "Show my own position on the map"
+            isChecked = Node.mapShowMe()
+            setOnCheckedChangeListener { _, v -> Node.setMapShowMe(v); refreshMap() }
+        })
+        col.addView(label(
+            "This only hides your marker on YOUR screen. What you share with the group is set under \"Share my location\". " +
+                "Your own marker appears only while you are sharing with this group.", 11f,
+        ))
+        val info = label("", 13f)
+        mapInfo = info
+        col.addView(info)
+        col.addView(label(
+            "Map pictures come from OpenStreetMap, fetched through Tor and kept in memory only. The map server can see " +
+                "which area you look at, not who you are or where anyone is. © OpenStreetMap contributors.", 11f,
+        ))
+        col.addView(button("Back to chat") { go(Screen.Chat("g:$groupId")) })
+        refreshMap()
+    }
+
+    private fun refreshMap() {
+        val s = screen as? Screen.Map ?: return
+        val mv = mapView ?: return
+        val now = System.currentTimeMillis()
+        val showMe = Node.mapShowMe()
+        val lines = ArrayList<String>()
+        val markers = Node.read { e ->
+            val names = e.contactList().associate { it.id to it.name }
+            val me = e.identityPublic.joinToString("") { "%02x".format(it) }
+            e.locations(s.groupId).mapNotNull { en ->
+                val isMe = en.sender == me
+                val who = if (isMe) "Me" else names[en.sender] ?: en.sender.take(6)
+                val p = en.latest
+                when {
+                    isMe && !showMe -> null
+                    en.paused -> { lines.add("$who: sharing paused"); null }
+                    p == null -> { lines.add("$who: no position yet"); null }
+                    else -> MapView.Marker(
+                        en.sender, who, p.lat, p.lon, p.accuracyM,
+                        ((now - p.timestamp) / 60_000L).coerceAtLeast(0),
+                        en.trail.map { doubleArrayOf(it.lat, it.lon) }, isMe,
+                    )
+                }
+            }
+        }
+        mv.setMarkers(markers)
+        for (m in markers) lines.add(
+            "${m.name}: ±${m.accuracyM} m, " + if (m.ageMin < 1) "just now" else if (m.ageMin < 60) "${m.ageMin} min ago" else "${m.ageMin / 60} h ago",
+        )
+        mapInfo?.text = if (lines.isEmpty()) "Nobody is sharing in this group yet." else lines.joinToString("\n")
     }
 
     private fun updateChatLog() {

@@ -106,6 +106,7 @@ class ChatService : Service() {
             val app = application
             val wakeLocks = AndroidWakeLockManagerFactory.createAndroidWakeLockManager(app)
             socksPort = freePort()
+            Node.socksPort = socksPort
             val controlPort = freePort()
             val w = AndroidTorWrapper(
                 app, wakeLocks, io, Executor { r -> mainHandler.post(r) },

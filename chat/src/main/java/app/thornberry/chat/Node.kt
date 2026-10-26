@@ -35,6 +35,8 @@ object Node {
 
     @Volatile var onion: String = ""
     @Volatile var torState: String = "STOPPED"
+    /** Local port of our own Tor client's SOCKS proxy (0 until Tor is started). Used for map tiles. */
+    @Volatile var socksPort: Int = 0
     @Volatile var loadError: String? = null
     @Volatile var selfTest: String = "not run"
     val listeners = CopyOnWriteArrayList<() -> Unit>()
@@ -216,6 +218,10 @@ object Node {
     fun sharingGroups(): List<Pair<String, Precision>> = read { e ->
         e.groupList().filter { it.session.isActive }.mapNotNull { g -> sharePrecision(g.id)?.let { g.id to it } }
     }
+
+    /** Whether our own marker is drawn on the map (display only: does not change what we share). */
+    fun mapShowMe(): Boolean = prefs.getBoolean("map_show_me", true)
+    fun setMapShowMe(v: Boolean) { prefs.edit().putBoolean("map_show_me", v).apply() }
 
     fun syncNow() { use { it.syncAll(System.currentTimeMillis()) } }
 }
