@@ -17,3 +17,4 @@ dependencyResolutionManagement {
 rootProject.name = "thornberry"
 include(":app")
 include(":core")
+include(":chat")

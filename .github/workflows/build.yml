@@ -31,7 +31,7 @@ jobs:
         with:
           gradle-version: "8.10.2"
 
-      - name: Build debug APK
+      - name: Build debug APKs (spike and chat)
         run: |
           set -o pipefail
           gradle --no-daemon assembleDebug 2>&1 | tee build.log
@@ -50,11 +50,24 @@ jobs:
           size=$(ls -l app/build/outputs/apk/debug/app-debug.apk | awk '{print $5}')
           echo "::notice title=apk-native-libs::APK bytes: $size%0A${out//$'\n'/%0A}"
 
+      - name: List chat app native libraries
+        run: |
+          out=$(unzip -l chat/build/outputs/apk/debug/chat-debug.apk | grep -E "\.so$|Archive" | awk '{print $1, $4}')
+          size=$(ls -l chat/build/outputs/apk/debug/chat-debug.apk | awk '{print $5}')
+          echo "::notice title=chat-apk::APK bytes: $size%0A${out//$'\n'/%0A}"
+
       - name: Upload APK as build artifact
         uses: actions/upload-artifact@v4
         with:
           name: thornberry-spike-debug-apk
           path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - name: Upload chat APK as build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: thornberry-chat-debug-apk
+          path: chat/build/outputs/apk/debug/*.apk
           if-no-files-found: error
 
       # Rolling TEST pre-release so the APK can be downloaded straight to a phone.
@@ -70,3 +83,16 @@ jobs:
             --prerelease \
             --title "Spike test build (not a release)" \
             --notes "Debug build for feasibility testing only. Do not use for real data. Built from commit ${{ github.sha }}."
+
+      # Second rolling TEST pre-release for the chat app (separate app, installs next to the spike).
+      - name: Publish chat test pre-release (main only)
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete chat-latest --yes --cleanup-tag || true
+          cp chat/build/outputs/apk/debug/chat-debug.apk thornberry-chat-debug.apk
+          gh release create chat-latest thornberry-chat-debug.apk \
+            --prerelease \
+            --title "Chat test build (not a release)" \
+            --notes "Debug build for testing only. Test data only. Built from commit ${{ github.sha }}."
