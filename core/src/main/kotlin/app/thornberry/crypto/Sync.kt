@@ -98,6 +98,7 @@ interface RecordStore {
     /** Not-expired records of the given groups, latest-expiring first. */
     fun list(groupIds: Collection<ByteArray>, now: Long, max: Int): List<StoredRecord>
     fun purgeExpired(now: Long): Int
+    fun all(): List<StoredRecord>
 }
 
 /** In-memory store with quotas; a database-backed store replaces it later (same interface). */
@@ -137,6 +138,7 @@ class InMemoryRecordStore : RecordStore {
         dead.forEach { evict(it) }
         return dead.size
     }
+    override fun all(): List<StoredRecord> = byId.values.toList()
     val totalBytes: Long get() = bytes
 }
 

@@ -172,6 +172,7 @@ class GroupSession private constructor(
     }
 
     val currentEpoch: Int get() = epoch
+    val groupIdHex: String get() = hex(groupId)
     val currentVersion: Int get() = version
     val isActive: Boolean get() = active
     fun memberKeys(): List<ByteArray> = members.map { it.copyOf() }
@@ -295,11 +296,16 @@ class GroupSession private constructor(
     }
 
     /** Add a member. Same key and epoch (no history for the newcomer unless you send it). Send the result to everyone, including the newcomer. */
-    fun addMember(admin: Crypto.KeyPair, newMember: ByteArray, now: Long): ByteArray {
+    fun addMember(admin: Crypto.KeyPair, newMember: ByteArray, now: Long, rotateKey: Boolean = false): ByteArray {
         requireAdmin(admin)
         if (isMember(newMember)) throw CryptoException("already a member")
         if (members.size >= MAX_MEMBERS) throw CryptoException("group is full")
-        return issue(admin, epoch, key, members + newMember, admins, now)
+        // With rotateKey the newcomer gets a fresh key, so they cannot read anything sent before they joined.
+        return if (rotateKey) {
+            issue(admin, epoch + 1, Crypto.randomBytes(32), members + newMember, admins, now)
+        } else {
+            issue(admin, epoch, key, members + newMember, admins, now)
+        }
     }
 
     /** Remove a member and rotate to a fresh random key. Send the result to every REMAINING member over their pairwise channel, never to the removed one. */

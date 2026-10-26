@@ -55,6 +55,10 @@ object Pairing {
         val isInitiator: Boolean,
         val peerIdentityPublic: ByteArray,
         val peerOnion: String,
+        /** 16-byte tag to put in front of every frame we send to this contact (lets the receiver find the session). */
+        val sendTag: ByteArray,
+        /** The tag we expect on frames from this contact. */
+        val receiveTag: ByteArray,
     )
 
     fun createOffer(identity: Crypto.KeyPair, onion: String): Local {
@@ -107,6 +111,9 @@ object Pairing {
         val digits = "%09d".format(n % 1_000_000_000L)
         val code = "${digits.substring(0, 3)} ${digits.substring(3, 6)} ${digits.substring(6, 9)}"
 
+        val tagFirst = Crypto.hkdf(ikm, transcript, "thornberry/pair/tag/first".toByteArray(), 16)
+        val tagSecond = Crypto.hkdf(ikm, transcript, "thornberry/pair/tag/second".toByteArray(), 16)
+
         val session = if (ownFirst) {
             DoubleRatchet.initiator(sk, peer.ephemeralPublic)
         } else {
@@ -119,6 +126,8 @@ object Pairing {
             isInitiator = ownFirst,
             peerIdentityPublic = peer.identityPublic,
             peerOnion = peer.onion,
+            sendTag = if (ownFirst) tagFirst else tagSecond,
+            receiveTag = if (ownFirst) tagSecond else tagFirst,
         )
     }
 
