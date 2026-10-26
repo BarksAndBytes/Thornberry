@@ -170,7 +170,7 @@ class ChatService : Service() {
         if (!sending.compareAndSet(false, true)) { return }
         io.execute {
             try {
-                val pending = Node.use { it.pendingFrames() }
+                val pending = Node.read { it.pendingFrames() }
                 val byContact = pending.groupBy { it.contactId }
                 for ((cid, frames) in byContact) {
                     synchronized(inFlight) { if (!inFlight.add(cid)) null else Unit } ?: continue

@@ -61,7 +61,22 @@ object Node {
         }
     }
 
-    fun changed() { main.post { listeners.forEach { it() } } }
+    private val refreshPosted = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** Ask the UI to redraw. Coalesced: many calls before the UI runs cause one redraw. */
+    fun changed() {
+        if (refreshPosted.compareAndSet(false, true)) {
+            main.post { refreshPosted.set(false); listeners.forEach { it() } }
+        }
+    }
+
+    /**
+     * Read-only access: no events drained, nothing saved, no redraw requested. Use this for drawing the UI.
+     * (Using [use] while drawing would request a redraw from inside the redraw, forever.)
+     */
+    fun <T> read(block: (ChatEngine) -> T): T = synchronized(lock) {
+        block(engine ?: throw IllegalStateException(loadError ?: "not ready"))
+    }
 
     /** Run [block] on the engine, then collect events, save, and notify. */
     fun <T> use(block: (ChatEngine) -> T): T {

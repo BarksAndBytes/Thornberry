@@ -114,7 +114,7 @@ class MainActivity : Activity() {
     }
 
     private fun home(col: LinearLayout) {
-        col.addView(label("Thornberry (test build)", 22f, true))
+        col.addView(label("Thornberry (test build 0.1.1)", 22f, true))
         col.addView(label("Test data only. No server. Not independently reviewed.", 12f))
         Node.loadError?.let { col.addView(label(it, 14f, true)); return }
         col.addView(label(
@@ -124,8 +124,8 @@ class MainActivity : Activity() {
         col.addView(button("Add contact (pair in person)") { go(Screen.Pair) })
         col.addView(button("New group") { newGroupDialog() })
 
-        val contacts = Node.use { it.contactList().map { c -> Triple(c.id, c.name, c.verified) } }
-        val groups = Node.use { it.groupList().map { g -> Triple(g.id, g.name, g.session.isActive) } }
+        val contacts = Node.read { it.contactList().map { c -> Triple(c.id, c.name, c.verified) } }
+        val groups = Node.read { it.groupList().map { g -> Triple(g.id, g.name, g.session.isActive) } }
         col.addView(label("Chats", 16f, true))
         if (contacts.isEmpty() && groups.isEmpty()) col.addView(label("Nothing yet. Add a contact to start.", 13f))
         for ((id, name, verified) in contacts) {
@@ -216,7 +216,7 @@ class MainActivity : Activity() {
     private fun chat(col: LinearLayout, conv: String) {
         val isGroup = conv.startsWith("g:")
         val id = conv.substring(2)
-        val title = Node.use { e ->
+        val title = Node.read { e ->
             if (isGroup) e.group(id)?.name ?: "Group" else e.contact(id)?.name ?: "Contact"
         }
         col.addView(label(title, 20f, true))
@@ -251,7 +251,7 @@ class MainActivity : Activity() {
         val s = screen as? Screen.Chat ?: return
         val log = chatLog ?: return
         val fmt = SimpleDateFormat("MMM d HH:mm", Locale.US)
-        val names = Node.use { e -> e.contactList().associate { it.id to it.name } }
+        val names = Node.read { e -> e.contactList().associate { it.id to it.name } }
         val sb = StringBuilder()
         for (m in Node.messages(s.conv)) {
             val who = if (m.outgoing) "Me" else names[m.sender] ?: m.sender.take(6)
@@ -274,7 +274,7 @@ class MainActivity : Activity() {
     }
 
     private fun inviteDialog(groupId: String) {
-        val contacts = Node.use { it.contactList().map { c -> c.id to c.name } }
+        val contacts = Node.read { it.contactList().map { c -> c.id to c.name } }
         if (contacts.isEmpty()) { toast("Pair with someone first"); return }
         AlertDialog.Builder(this).setTitle("Invite")
             .setItems(contacts.map { it.second }.toTypedArray()) { _, i ->
@@ -286,7 +286,7 @@ class MainActivity : Activity() {
     }
 
     private fun membersDialog(groupId: String) {
-        val rows = Node.use { e ->
+        val rows = Node.read { e ->
             val g = e.group(groupId) ?: return@use emptyList()
             val names = e.contactList().associate { it.id to it.name }
             g.session.memberKeys().map { k ->
