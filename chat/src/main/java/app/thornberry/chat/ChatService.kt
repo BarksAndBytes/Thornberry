@@ -6,7 +6,16 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.location.Location
+import android.location.LocationManager
+import android.os.BatteryManager
+import android.os.CancellationSignal
+import app.thornberry.crypto.LocationFix
+import app.thornberry.crypto.LocationPolicy
+import app.thornberry.crypto.Geo
+import kotlin.math.roundToInt
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -41,6 +50,7 @@ class ChatService : Service() {
 
     companion object {
         const val ACTION_STOP = "app.thornberry.chat.STOP"
+        const val ACTION_LOCATION_REFRESH = "app.thornberry.chat.LOCATION_REFRESH"
         private const val CHANNEL_STATUS = "status"
         private const val CHANNEL_MSG = "messages"
         private const val NOTIFICATION_ID = 1
@@ -62,6 +72,9 @@ class ChatService : Service() {
     @Volatile private var socksPort = 0
     private var started = false
     private var msgCount = 0
+    private val locationLoop = AtomicBoolean(false)
+    private val lastSent = HashMap<String, LocationPolicy.Sent>()
+    private var lastSample: Pair<Double, Double>? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -70,7 +83,8 @@ class ChatService : Service() {
             shutdown(); stopSelf(); return START_NOT_STICKY
         }
         Node.init(this)
-        startInForeground("Starting")
+        startInForeground(if (started) "Tor ${Node.torState}" else "Starting")
+        if (intent?.action == ACTION_LOCATION_REFRESH) { io.execute { locationSetup() }; return START_STICKY }
         if (!started) {
             started = true
             running = true
@@ -122,6 +136,7 @@ class ChatService : Service() {
             updateNotification("Connected")
 
             io.execute { acceptLoop(srv) }
+            io.execute { locationSetup() }
             scheduler.scheduleWithFixedDelay({ requestSend() }, 20, 30, TimeUnit.SECONDS)
             scheduler.scheduleWithFixedDelay({
                 try { Node.syncNow() } catch (_: Exception) {}
@@ -208,6 +223,83 @@ class ChatService : Service() {
         } catch (e: Exception) {
             // Stays queued; retried every 30 seconds.
             ChatLog.log("FRAME_OUT_FAIL", "${e.javaClass.simpleName} queued=${frames.size}")
+        }
+    }
+
+    // ---------------- location sharing ----------------
+
+    private fun hasLocationPermission() =
+        checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+
+    /** Start sampling if any group is set to share and permission is granted. Safe to call repeatedly. */
+    private fun locationSetup() {
+        if (!running) return
+        if (Node.sharingGroups().isEmpty() || !hasLocationPermission()) return
+        try {
+            val n = buildNotification("Sharing location with your groups")
+            if (Build.VERSION.SDK_INT >= 34) {
+                startForeground(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
+            } else {
+                startForeground(NOTIFICATION_ID, n)
+            }
+        } catch (e: Exception) {
+            // Android refuses the location type if the service was started in the background. Open the app to retry.
+            ChatLog.err("fgs-location", e)
+            return
+        }
+        if (locationLoop.compareAndSet(false, true)) {
+            ChatLog.log("LOC_START")
+            scheduler.schedule({ sampleLocation() }, 3, TimeUnit.SECONDS)
+        }
+    }
+
+    private fun pickProvider(lm: LocationManager): String? {
+        val order = buildList {
+            if (Build.VERSION.SDK_INT >= 31) add(LocationManager.FUSED_PROVIDER)
+            add(LocationManager.GPS_PROVIDER); add(LocationManager.NETWORK_PROVIDER)
+        }
+        return order.firstOrNull { try { lm.isProviderEnabled(it) } catch (_: Exception) { false } }
+    }
+
+    private fun sampleLocation() {
+        try {
+            if (!running) { locationLoop.set(false); return }
+            if (Node.sharingGroups().isEmpty() || !hasLocationPermission()) { locationLoop.set(false); ChatLog.log("LOC_STOP"); return }
+            val lm = getSystemService(LocationManager::class.java)
+            val provider = pickProvider(lm)
+            if (provider == null) { ChatLog.log("LOC_NO_PROVIDER"); scheduler.schedule({ sampleLocation() }, 120, TimeUnit.SECONDS); return }
+            val cancel = CancellationSignal()
+            mainHandler.postDelayed({ cancel.cancel() }, 30_000)
+            lm.getCurrentLocation(provider, cancel, io) { loc -> onFix(loc) }
+        } catch (e: Exception) {
+            ChatLog.err("sampleLocation", e)
+            scheduler.schedule({ sampleLocation() }, 120, TimeUnit.SECONDS)
+        }
+    }
+
+    private fun onFix(loc: Location?) {
+        var delay = 120_000L
+        try {
+            if (loc == null) { ChatLog.log("LOC_NO_FIX"); return }
+            val now = System.currentTimeMillis()
+            val battery = try { getSystemService(BatteryManager::class.java).getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) } catch (_: Exception) { null }
+            // The battery level is used only for the sending schedule here; it is not included in what is shared.
+            val fix = LocationFix(loc.latitude, loc.longitude, loc.accuracy.roundToInt(), now, if (loc.hasSpeed()) loc.speed else null, null)
+            val prev = lastSample
+            val moved = prev != null && Geo.distanceM(prev.first, prev.second, fix.lat, fix.lon) > 30
+            lastSample = fix.lat to fix.lon
+            for ((gid, precision) in Node.sharingGroups()) {
+                if (LocationPolicy.shouldSend(lastSent[gid], fix, now, battery)) {
+                    Node.use { it.shareLocation(gid, fix, precision, now) }
+                    lastSent[gid] = LocationPolicy.Sent(fix.lat, fix.lon, now)
+                    ChatLog.log("LOC_SENT", "group=${gid.take(4)} precision=${precision.name} acc=${fix.accuracyM}")
+                }
+            }
+            delay = LocationPolicy.nextSampleDelayMs(moved, battery)
+        } catch (e: Exception) {
+            ChatLog.err("onFix", e)
+        } finally {
+            if (running) scheduler.schedule({ sampleLocation() }, delay, TimeUnit.MILLISECONDS)
         }
     }
 

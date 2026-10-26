@@ -116,7 +116,7 @@ class MainActivity : Activity() {
     }
 
     private fun home(col: LinearLayout) {
-        col.addView(label("Thornberry (test build 0.1.3)", 22f, true))
+        col.addView(label("Thornberry (test build 0.2.0)", 22f, true))
         col.addView(label("Test data only. No server. Not independently reviewed.", 12f))
         Node.loadError?.let { col.addView(label(it, 14f, true)); return }
         col.addView(label(
@@ -238,6 +238,8 @@ class MainActivity : Activity() {
         }
         col.addView(label(title, 20f, true))
         if (isGroup) {
+            col.addView(button("Where is everyone") { whereDialog(id) })
+            col.addView(button("Share my location: " + (Node.sharePrecision(id)?.label ?: "Off")) { shareDialog(id) })
             col.addView(button("Members") { membersDialog(id) })
             col.addView(button("Invite a contact") { inviteDialog(id) })
         }
@@ -300,6 +302,79 @@ class MainActivity : Activity() {
                     toast("Invited ${contacts[i].second}")
                 } catch (e: Exception) { toast("Could not invite: ${e.message}") }
             }.show()
+    }
+
+    private var pendingShare: Pair<String, app.thornberry.crypto.Precision>? = null
+
+    private fun shareDialog(groupId: String) {
+        val opts = listOf<app.thornberry.crypto.Precision?>(null) + app.thornberry.crypto.Precision.values().toList()
+        val names = opts.map { it?.label ?: "Off" }.toTypedArray()
+        AlertDialog.Builder(this).setTitle("Share my location with this group")
+            .setMessage("Only members of this group can see it. Nothing goes to any server. Updates every few minutes, at least every 10.")
+            .setItems(names) { _, i ->
+                val p = opts[i]
+                if (p == null) {
+                    Node.setSharePrecision(groupId, null); render()
+                } else if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                    enableShare(groupId, p)
+                } else {
+                    pendingShare = groupId to p
+                    requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION), 7)
+                }
+            }.show()
+    }
+
+    private fun enableShare(groupId: String, p: app.thornberry.crypto.Precision) {
+        Node.setSharePrecision(groupId, p)
+        startForegroundService(Intent(this, ChatService::class.java).setAction(ChatService.ACTION_LOCATION_REFRESH))
+        render()
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != 7) return
+        val pend = pendingShare; pendingShare = null
+        if (pend != null && checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+            enableShare(pend.first, pend.second)
+        } else {
+            toast("Location permission is needed to share. Nothing is shared.")
+        }
+    }
+
+    private fun whereDialog(groupId: String) {
+        val now = System.currentTimeMillis()
+        data class Row(val label: String, val lat: Double?, val lon: Double?)
+        val rows = Node.read { e ->
+            val names = e.contactList().associate { it.id to it.name }
+            val me = e.identityPublic.joinToString("") { "%02x".format(it) }
+            e.locations(groupId).map { en ->
+                val who = if (en.sender == me) "Me" else names[en.sender] ?: en.sender.take(8)
+                val p = en.latest
+                val text = when {
+                    en.paused -> "$who: sharing paused"
+                    p == null -> "$who: no position yet"
+                    else -> {
+                        val mins = ((now - p.timestamp) / 60_000L).coerceAtLeast(0)
+                        val ago = if (mins < 1) "just now" else if (mins < 60) "$mins min ago" else "${mins / 60} h ago"
+                        val stale = if (mins > 15) " (old)" else ""
+                        "$who: %.5f, %.5f (±%d m), %s%s".format(Locale.US, p.lat, p.lon, p.accuracyM, ago, stale)
+                    }
+                }
+                Row(text, if (en.paused) null else p?.lat, if (en.paused) null else p?.lon)
+            }
+        }
+        if (rows.isEmpty()) { toast("Nobody is sharing in this group yet"); return }
+        AlertDialog.Builder(this).setTitle("Where is everyone")
+            .setItems(rows.map { it.label }.toTypedArray()) { _, i ->
+                val r = rows[i]
+                if (r.lat != null && r.lon != null) {
+                    try {
+                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("geo:${r.lat},${r.lon}?q=${r.lat},${r.lon}")))
+                    } catch (e: Exception) { toast("No map app found") }
+                }
+            }
+            .setMessage("Tap a line to open it in your map app (that app may contact its own servers).")
+            .setNegativeButton("Close", null).show()
     }
 
     private fun membersDialog(groupId: String) {

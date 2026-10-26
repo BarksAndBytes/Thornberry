@@ -1,6 +1,8 @@
 package app.thornberry.chat
 
 import android.content.Context
+import android.content.SharedPreferences
+import app.thornberry.crypto.Precision
 import android.os.Handler
 import android.os.Looper
 import app.thornberry.crypto.ChatEngine
@@ -24,6 +26,7 @@ object Node {
     private val lock = Any()
     private val main = Handler(Looper.getMainLooper())
     private lateinit var dir: File
+    private lateinit var prefs: SharedPreferences
     private var engine: ChatEngine? = null
     private val history = ArrayList<Msg>()
     private var pairingLocal: Pairing.Local? = null
@@ -46,6 +49,7 @@ object Node {
         synchronized(lock) {
             if (engine != null || loadError != null) return
             dir = ctx.filesDir
+            prefs = ctx.getSharedPreferences("share", Context.MODE_PRIVATE)
             ChatLog.init(ctx)
             selfTest = SelfTest.run()
             ChatLog.log("START", "selfTest=$selfTest")
@@ -191,6 +195,26 @@ object Node {
             pairingLocal = null
             engine?.cancelPairing()
         }
+    }
+
+    // ---------------- location sharing settings (per group; off by default) ----------------
+
+    fun sharePrecision(groupId: String): Precision? =
+        prefs.getInt("share_$groupId", -1).let { if (it < 0) null else Precision.values()[it] }
+
+    /** Turn sharing for a group on at a precision, or off (null). Tells the group so "paused" is not mistaken for "lost signal". */
+    fun setSharePrecision(groupId: String, p: Precision?) {
+        val before = sharePrecision(groupId)
+        prefs.edit().putInt("share_$groupId", p?.ordinal ?: -1).apply()
+        if ((before == null) != (p == null)) {
+            try { use { it.setSharingPaused(groupId, p == null, System.currentTimeMillis()) } } catch (e: Exception) { ChatLog.err("pauseFlag", e) }
+        }
+        ChatLog.log("SHARE_SETTING", "group=${groupId.take(4)} precision=${p?.name ?: "OFF"}")
+        changed()
+    }
+
+    fun sharingGroups(): List<Pair<String, Precision>> = read { e ->
+        e.groupList().filter { it.session.isActive }.mapNotNull { g -> sharePrecision(g.id)?.let { g.id to it } }
     }
 
     fun syncNow() { use { it.syncAll(System.currentTimeMillis()) } }
