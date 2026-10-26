@@ -116,7 +116,7 @@ class MainActivity : Activity() {
     }
 
     private fun home(col: LinearLayout) {
-        col.addView(label("Thornberry (test build 0.2.0)", 22f, true))
+        col.addView(label("Thornberry (test build 0.2.1)", 22f, true))
         col.addView(label("Test data only. No server. Not independently reviewed.", 12f))
         Node.loadError?.let { col.addView(label(it, 14f, true)); return }
         col.addView(label(
@@ -304,15 +304,37 @@ class MainActivity : Activity() {
             }.show()
     }
 
+    /**
+     * A list dialog with an explanation above it. (AlertDialog hides its list when a message is set,
+     * which is why the explanation is part of the dialog's own view here.)
+     */
+    private fun choiceDialog(title: String, message: String, labels: List<String>, onPick: (Int) -> Unit) {
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(8), dp(16), dp(8)) }
+        col.addView(TextView(this).apply { text = message; textSize = 13f; setPadding(0, 0, 0, dp(8)) })
+        val sv = ScrollView(this).apply { addView(col) }
+        val dlg = AlertDialog.Builder(this).setTitle(title).setView(sv).setNegativeButton("Close", null).create()
+        labels.forEachIndexed { i, l ->
+            col.addView(Button(this).apply {
+                text = l; isAllCaps = false; textAlignment = View.TEXT_ALIGNMENT_VIEW_START
+                setOnClickListener { dlg.dismiss(); onPick(i) }
+            })
+        }
+        dlg.show()
+    }
+
     private var pendingShare: Pair<String, app.thornberry.crypto.Precision>? = null
 
     private fun shareDialog(groupId: String) {
         val opts = listOf<app.thornberry.crypto.Precision?>(null) + app.thornberry.crypto.Precision.values().toList()
         val names = opts.map { it?.label ?: "Off" }.toTypedArray()
-        AlertDialog.Builder(this).setTitle("Share my location with this group")
-            .setMessage("Only members of this group can see it. Nothing goes to any server. Updates every few minutes, at least every 10.")
-            .setItems(names) { _, i ->
-                val p = opts[i]
+        choiceDialog(
+            "Share my location with this group",
+            "Only members of this group can see it. Nothing goes to any server. Updates every few minutes, at least every 10. " +
+                "A notification stays visible while sharing.",
+            names.toList(),
+        ) { i ->
+            val p = opts[i]
+            try {
                 if (p == null) {
                     Node.setSharePrecision(groupId, null); render()
                 } else if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
@@ -321,7 +343,10 @@ class MainActivity : Activity() {
                     pendingShare = groupId to p
                     requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION), 7)
                 }
-            }.show()
+            } catch (e: Exception) {
+                ChatLog.err("shareDialog", e); toast("Could not change sharing: ${e.message}")
+            }
+        }
     }
 
     private fun enableShare(groupId: String, p: app.thornberry.crypto.Precision) {
@@ -364,17 +389,18 @@ class MainActivity : Activity() {
             }
         }
         if (rows.isEmpty()) { toast("Nobody is sharing in this group yet"); return }
-        AlertDialog.Builder(this).setTitle("Where is everyone")
-            .setItems(rows.map { it.label }.toTypedArray()) { _, i ->
-                val r = rows[i]
-                if (r.lat != null && r.lon != null) {
-                    try {
-                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("geo:${r.lat},${r.lon}?q=${r.lat},${r.lon}")))
-                    } catch (e: Exception) { toast("No map app found") }
-                }
+        choiceDialog(
+            "Where is everyone",
+            "Tap a line to open it in your map app (that app may contact its own servers).",
+            rows.map { it.label },
+        ) { i ->
+            val r = rows[i]
+            if (r.lat != null && r.lon != null) {
+                try {
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("geo:${r.lat},${r.lon}?q=${r.lat},${r.lon}")))
+                } catch (e: Exception) { toast("No map app found") }
             }
-            .setMessage("Tap a line to open it in your map app (that app may contact its own servers).")
-            .setNegativeButton("Close", null).show()
+        }
     }
 
     private fun membersDialog(groupId: String) {
