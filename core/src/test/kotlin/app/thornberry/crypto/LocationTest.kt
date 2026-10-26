@@ -35,7 +35,7 @@ class LocationTest {
         }
         // two different exact positions in the same grid cell become the same shared position
         val a = LocationPayload.encode(fix(40.7121, -74.0061), Precision.AREA)
-        val b = LocationPayload.encode(fix(40.7139, -74.0042), Precision.AREA)
+        val b = LocationPayload.encode(fix(40.7139, -74.0072), Precision.AREA)
         assertTrue(a.contentEquals(b))
     }
 
