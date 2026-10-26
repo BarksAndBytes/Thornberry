@@ -181,6 +181,29 @@ class MainActivity : Activity() {
                 setImageBitmap(qr("thornberry1:" + Base64.encodeToString(offer, Base64.NO_WRAP or Base64.URL_SAFE or Base64.NO_PADDING)))
                 setBackgroundColor(Color.WHITE); adjustViewBounds = true
             })
+            if (BuildConfig.DEBUG) {
+                // TEST BUILDS ONLY: lets two copies on one phone pair without a camera. The clipboard is
+                // readable by other apps, so this does not exist in release builds.
+                col.addView(label("Test-only shortcut (not in release builds):", 12f, true))
+                col.addView(button("Copy my code as text") {
+                    val txt = "thornberry1:" + Base64.encodeToString(offer, Base64.NO_WRAP or Base64.URL_SAFE or Base64.NO_PADDING)
+                    val clip = android.content.ClipData.newPlainText("code", txt)
+                    if (Build.VERSION.SDK_INT >= 33) {
+                        clip.description.extras = android.os.PersistableBundle().apply {
+                            putBoolean("android.content.extra.IS_SENSITIVE", true)
+                        }
+                    }
+                    getSystemService(android.content.ClipboardManager::class.java).setPrimaryClip(clip)
+                    toast("Copied (test only)")
+                })
+                col.addView(button("Paste their code") {
+                    pairName = name.text.toString().trim().ifEmpty { "Contact" }
+                    val txt = getSystemService(android.content.ClipboardManager::class.java)
+                        .primaryClip?.getItemAt(0)?.text?.toString()?.trim().orEmpty()
+                    handleScanned(txt)
+                    render()
+                })
+            }
             col.addView(button("Scan their code") {
                 pairName = name.text.toString().trim().ifEmpty { "Contact" }
                 IntentIntegrator(this).setDesiredBarcodeFormats(IntentIntegrator.QR_CODE)
@@ -291,6 +314,11 @@ class MainActivity : Activity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         val text = IntentIntegrator.parseActivityResult(requestCode, resultCode, data)?.contents ?: return
+        handleScanned(text)
+        render()
+    }
+
+    private fun handleScanned(text: String) {
         try {
             require(text.startsWith("thornberry1:")) { "not a Thornberry code" }
             val bytes = Base64.decode(text.removePrefix("thornberry1:"), Base64.URL_SAFE or Base64.NO_PADDING)
@@ -298,7 +326,6 @@ class MainActivity : Activity() {
         } catch (e: Exception) {
             toast("Could not pair: ${e.message}")
         }
-        render()
     }
 
     private fun qr(text: String): Bitmap {

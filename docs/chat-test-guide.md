@@ -13,10 +13,9 @@ Settings > Apps > Dual apps > turn on **Thornberry (test)**. Open the copy and d
 ## Pair the two copies
 1. Wait until "My address" shows on both copies (a minute or two).
 2. Copy A: **Add contact**, type a name for the other copy. Copy B: same.
-3. On copy A tap **Scan their code** and scan copy B's QR code. Then on copy B tap **Scan their code** and scan A's. (You hold the phone's camera to its own screen is not possible with one phone: with two copies on ONE phone you cannot scan one screen with the same phone's camera. See the note below.)
-4. Both show a 9-digit safety code. Confirm they match, tap **Codes match**.
-
-**Note for one-phone testing:** the camera cannot see the screen of the app that is using it. If you only have this one phone, scanning between the two copies will not work. Options: use a second device or a friend's phone for the other copy; or take a photo of the QR code with a different camera app and tell me, and I will add an "import code" paste option for testing only. Tell me which you prefer.
+3. With two phones: on each, tap **Scan their code** and scan the other phone's QR code (both directions).
+   With two copies on ONE phone the camera cannot scan its own screen, so use the test-only shortcut: on copy A tap **Copy my code as text**; switch to copy B, type A's name, tap **Paste their code**. Then on copy B tap **Copy my code as text**; switch to copy A and tap **Paste their code**. (The clipboard can be read by other apps, so this shortcut exists only in these test builds and will not be in a real release.)
+4. Both copies show a 9-digit safety code. Confirm they match, tap **Codes match**.
 
 ## What to try once paired
 - Send direct messages both ways (screen on, then screen off for 10 minutes, then send).
