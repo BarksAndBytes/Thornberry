@@ -100,6 +100,7 @@ class ChatService : Service() {
             wrapper = w
             w.setObserver(object : TorWrapper.Observer {
                 override fun onState(s: TorWrapper.TorState) {
+                    ChatLog.log("TOR_STATE", s.name)
                     Node.torState = s.name; Node.changed(); updateNotification("Tor ${s.name}")
                     if (s.name == "CONNECTED") requestSend()
                 }
@@ -116,6 +117,7 @@ class ChatService : Service() {
             val props = w.publishHiddenService(srv.localPort, ONION_PORT, savedKey)
             if (savedKey == null) SecureStorage.write(filesDir, HS_KEY_FILE, props.privKey.toByteArray(Charsets.UTF_8))
             Node.onion = if (props.onion.endsWith(".onion")) props.onion else props.onion + ".onion"
+            ChatLog.log("ONION_PUBLISHED", "prefix=${Node.onion.take(6)}")
             Node.changed()
             updateNotification("Connected")
 
@@ -125,6 +127,7 @@ class ChatService : Service() {
                 try { Node.syncNow() } catch (_: Exception) {}
             }, 60, 180, TimeUnit.SECONDS)
         } catch (e: Throwable) {
+            ChatLog.err("runTor", e)
             updateNotification("Error: ${e.javaClass.simpleName}")
         }
     }
@@ -155,7 +158,8 @@ class ChatService : Service() {
                     if (len <= 0 || len > MAX_FRAME) break
                     val frame = ByteArray(len)
                     inp.readFully(frame)
-                    try { Node.use { e -> e.receiveFrame(frame, System.currentTimeMillis()) } } catch (_: Exception) {}
+                    try { Node.use { e -> e.receiveFrame(frame, System.currentTimeMillis()) } } catch (e: Exception) { ChatLog.err("receive", e) }
+                    ChatLog.log("FRAME_IN", "bytes=${frame.size} dropped=${Node.read { it.droppedFrames }}")
                     out.writeByte(1); out.flush()
                 }
             } catch (_: Exception) {
@@ -178,7 +182,8 @@ class ChatService : Service() {
                         try { sendTo(frames) } finally { synchronized(inFlight) { inFlight.remove(cid) } }
                     }
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                ChatLog.err("requestSend", e)
             } finally {
                 sending.set(false)
             }
@@ -197,10 +202,12 @@ class ChatService : Service() {
                     out.writeInt(f.frame.size); out.write(f.frame); out.flush()
                     if (inp.readByte().toInt() != 1) return
                     Node.use { it.markDelivered(f) }
+                    ChatLog.log("FRAME_OUT_OK", "bytes=${f.frame.size}")
                 }
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             // Stays queued; retried every 30 seconds.
+            ChatLog.log("FRAME_OUT_FAIL", "${e.javaClass.simpleName} queued=${frames.size}")
         }
     }
 

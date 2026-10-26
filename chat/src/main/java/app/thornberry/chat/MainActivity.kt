@@ -116,7 +116,7 @@ class MainActivity : Activity() {
     }
 
     private fun home(col: LinearLayout) {
-        col.addView(label("Thornberry (test build 0.1.2)", 22f, true))
+        col.addView(label("Thornberry (test build 0.1.3)", 22f, true))
         col.addView(label("Test data only. No server. Not independently reviewed.", 12f))
         Node.loadError?.let { col.addView(label(it, 14f, true)); return }
         col.addView(label(
@@ -145,6 +145,7 @@ class MainActivity : Activity() {
         col.addView(button("Open app settings (autostart, battery)") {
             startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
         })
+        col.addView(button("Save diagnostic log to a file") { startLogSave() })
         col.addView(button("Stop connection") { startService(Intent(this, ChatService::class.java).setAction(ChatService.ACTION_STOP)) })
         col.addView(button("Start connection") { startForegroundService(Intent(this, ChatService::class.java)) })
     }
@@ -326,9 +327,29 @@ class MainActivity : Activity() {
 
     // ------------------------------------------------------------ scanning
 
+    private fun startLogSave() {
+        val stamp = SimpleDateFormat("yyyy-MM-dd-HHmm", Locale.US).format(Date())
+        val i = Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+            .setType("text/plain").putExtra(Intent.EXTRA_TITLE, "thornberry-chat-log-$stamp.txt")
+        try { startActivityForResult(i, 4301) } catch (e: Exception) { toast("No file picker available") }
+    }
+
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == 4301) {
+            val uri = data?.data
+            if (resultCode == RESULT_OK && uri != null) {
+                Thread {
+                    val msg = try {
+                        contentResolver.openOutputStream(uri, "wt")?.use { it.write(ChatLog.fullText().toByteArray()) }
+                        "Saved"
+                    } catch (e: Exception) { "Save failed: ${e.message}" }
+                    runOnUiThread { toast(msg) }
+                }.start()
+            }
+            return
+        }
         val text = IntentIntegrator.parseActivityResult(requestCode, resultCode, data)?.contents ?: return
         handleScanned(text)
         render()

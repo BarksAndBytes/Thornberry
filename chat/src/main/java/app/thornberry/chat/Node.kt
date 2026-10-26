@@ -46,7 +46,9 @@ object Node {
         synchronized(lock) {
             if (engine != null || loadError != null) return
             dir = ctx.filesDir
+            ChatLog.init(ctx)
             selfTest = SelfTest.run()
+            ChatLog.log("START", "selfTest=$selfTest")
             try {
                 val snap = SecureStorage.read(dir, ENGINE_FILE)
                 engine = if (snap == null) {
@@ -59,6 +61,7 @@ object Node {
                 // Never overwrite unreadable state with an empty one: the owner may be able to recover it.
                 engine = null
                 loadError = "Saved data could not be opened (${e.javaClass.simpleName}). Nothing was changed."
+                ChatLog.err("load", e)
             }
         }
     }
@@ -100,6 +103,7 @@ object Node {
                     is ChatEngine.Event.RemovedFromGroup -> notifyHook?.invoke("You were removed from a group")
                     is ChatEngine.Event.GroupChanged -> {}
                     is ChatEngine.Event.Paired -> {
+                        ChatLog.log("PAIRED_BY_RESPONSE")
                         e.contact(ev.contactId)?.let { pendingPairing = ChatEngine.PairingResult(it, ev.safetyCode) }
                         pairingLocal = null
                         notifyHook?.invoke("Someone paired with you: compare the safety code")
