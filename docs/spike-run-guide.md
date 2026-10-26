@@ -46,7 +46,7 @@ If you change the interval later, tap **Stop** then **Start** to apply it.
 Do run A first. Note the battery percentage at the start.
 
 ## 6. Send me the results
-After each run, open either copy and tap **Share summary and recent log**. Paste it into this chat. Do this in both copies if both were running. The summary reports:
+After each run, open either copy and tap **Save summary and full log to a file** (version 0.0.4 and later; pick a folder such as Downloads and save). Attach the saved file(s) to this chat. Do this in both copies if both were running. The summary reports:
 - ping success rate and round-trip times
 - longest gap between successful messages and how many gaps exceeded 10 minutes
 - Tor reconnects, service restarts after Android killed it
@@ -58,7 +58,7 @@ Normal use hides the app's real cost. Two idle nights, same conditions, give a c
 - **Night 2, baseline:** only the ORIGINAL copy, started with **Start baseline (Tor OFF, battery logging only)**. Tor is off and the app makes no network traffic. Make sure the second copy is stopped.
 - Same room, same Wi-Fi, same starting battery level (aim for 70% or more), no charging, and don't touch the phone.
 - Tap **Clear log** in each copy just before going to bed, so each night's summary is clean. (The earlier results are already saved in the project.)
-- In the morning, tap **Share summary and recent log** in the original copy (and the second copy for the Tor night) and paste the results here.
+- In the morning, tap **Save summary and full log to a file** (version 0.0.4 and later; pick a folder such as Downloads and save) in the original copy (and the second copy for the Tor night) and attach the saved files here.
 The summary then reports drain per hour for each mode and screen state, in battery points and in mAh. The app's cost is roughly the difference between the Tor night and the baseline night (divide by two for the cost of one copy, since two copies ran).
 
 ## Updating the app mid-test

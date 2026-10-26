@@ -28,6 +28,7 @@ import android.widget.Toast
  */
 class MainActivity : Activity() {
 
+    private val REQ_SAVE = 4201
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var status: TextView
     private lateinit var tail: TextView
@@ -63,7 +64,7 @@ class MainActivity : Activity() {
         }
 
         col.addView(label("Thornberry spike (test build)", 20f, true))
-        col.addView(label("Version 0.0.3-spike. Test data only. Not for real use.", 12f))
+        col.addView(label("Version 0.0.4-spike. Test data only. Not for real use.", 12f))
 
         status = label("", 13f).apply { typeface = Typeface.MONOSPACE; setPadding(0, dp(8), 0, dp(8)) }
         col.addView(status)
@@ -122,16 +123,7 @@ class MainActivity : Activity() {
         })
 
         col.addView(label("Results:", 13f, true))
-        col.addView(button("Share summary and recent log") {
-            val text = SpikeLog.summary() + "\n--- recent events ---\n" +
-                SpikeLog.recentLines(150).joinToString("\n")
-            startActivity(
-                Intent.createChooser(
-                    Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text),
-                    "Share summary",
-                ),
-            )
-        })
+        col.addView(button("Save summary and full log to a file") { startSaveDialog() })
         col.addView(button("Clear log") {
             SpikeLog.clear()
             toast("Log cleared")
@@ -160,6 +152,38 @@ class MainActivity : Activity() {
     override fun onPause() {
         handler.removeCallbacks(refresh)
         super.onPause()
+    }
+
+    private fun startSaveDialog() {
+        val stamp = java.text.SimpleDateFormat("yyyy-MM-dd-HHmm", java.util.Locale.US).format(java.util.Date())
+        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT)
+            .addCategory(Intent.CATEGORY_OPENABLE)
+            .setType("text/plain")
+            .putExtra(Intent.EXTRA_TITLE, "thornberry-spike-$stamp.txt")
+        try {
+            startActivityForResult(intent, REQ_SAVE)
+        } catch (e: Exception) {
+            toast("No file picker available")
+        }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQ_SAVE || resultCode != RESULT_OK) return
+        val uri = data?.data ?: return
+        // The report is built when you confirm the save, so it includes everything up to now.
+        Thread {
+            val msg = try {
+                val text = SpikeLog.fullReport()
+                contentResolver.openOutputStream(uri, "wt")?.use { it.write(text.toByteArray(Charsets.UTF_8)) }
+                    ?: throw IllegalStateException("could not open file")
+                "Saved (${text.length / 1024} KB)"
+            } catch (e: Exception) {
+                "Save failed: ${e.message}"
+            }
+            runOnUiThread { toast(msg) }
+        }.start()
     }
 
     private fun startSpike(baseline: Boolean) {

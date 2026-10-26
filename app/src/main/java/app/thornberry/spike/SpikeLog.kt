@@ -56,6 +56,36 @@ object SpikeLog {
 
     fun recentLines(n: Int): List<String> = synchronized(lock) { recent.toList().takeLast(n) }
 
+    /**
+     * Summary plus the COMPLETE event log (including the rotated older file, if any), with readable
+     * timestamps, as one text. Used by the "Save summary and full log" button.
+     */
+    fun fullReport(): String {
+        val fmt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+        val files = synchronized(lock) {
+            val f = file
+            if (f == null) emptyList() else listOf(File(f.parentFile, "spike-events.old.csv"), f)
+        }
+        val sb = StringBuilder()
+        sb.append(summary()).append("\n\n--- full event log (local time, type, details) ---\n")
+        var lines = 0
+        for (f in files) {
+            if (!f.exists()) continue
+            f.forEachLine { line ->
+                val parts = line.split(',', limit = 3)
+                val t = parts.getOrNull(0)?.toLongOrNull()
+                if (t != null && parts.size >= 2) {
+                    sb.append(fmt.format(Date(t))).append(' ').append(parts[1])
+                    if (parts.size > 2 && parts[2].isNotEmpty()) sb.append(' ').append(parts[2])
+                    sb.append('\n')
+                    lines++
+                }
+            }
+        }
+        sb.append("--- end of log (").append(lines).append(" events) ---\n")
+        return sb.toString()
+    }
+
     fun clear() {
         synchronized(lock) {
             try {
