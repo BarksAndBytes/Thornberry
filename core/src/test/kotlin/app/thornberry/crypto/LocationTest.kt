@@ -201,4 +201,71 @@ class LocationTest {
         assertEquals(1, old.groupList().size)
         assertTrue(old.locations(old.groupList().single().id).isEmpty())
     }
+
+    // ---------- route history (track records) ----------
+
+    private fun route(from: Int, to: Int) = (from..to).map { i -> fix(40.0 + i * 0.001, -74.0 + i * 0.001, t = now + i * 30_000L) }
+
+    @Test fun track_round_trips_and_decode_is_strict() {
+        val fixes = route(0, 9)
+        val body = LocationPayload.encodeTrack(fixes, Precision.EXACT)
+        val pts = LocationPayload.decodeTrack(body)
+        assertEquals(10, pts.size)
+        assertEquals(now + 9 * 30_000L, pts.last().timestamp)
+        assertEquals(40.009, pts.last().lat, 1e-6)
+        for (n in 0 until body.size) assertFailsWith<CryptoException>("trunc $n") { LocationPayload.decodeTrack(body.copyOf(n)) }
+        assertFailsWith<CryptoException> { LocationPayload.decodeTrack(body + byteArrayOf(0)) }
+        assertFailsWith<CryptoException> { LocationPayload.decodeTrack(body.copyOf().also { it[0] = 2 }) }
+        // a zero time step is refused (times must increase)
+        assertFailsWith<CryptoException> { LocationPayload.decodeTrack(body.copyOf().also { for (k in 0 until 4) it[31 + k] = 0 }) }
+        assertFailsWith<IllegalArgumentException> { LocationPayload.encodeTrack(emptyList(), Precision.EXACT) }
+        assertFailsWith<IllegalArgumentException> { LocationPayload.encodeTrack(route(0, 200), Precision.EXACT) }
+        assertFailsWith<IllegalArgumentException> { LocationPayload.encodeTrack(listOf(fix(t = now + 5), fix(t = now)), Precision.EXACT) }
+        // coarse precision applies to every point
+        val coarse = LocationPayload.decodeTrack(LocationPayload.encodeTrack(fixes, Precision.AREA))
+        assertTrue(coarse.all { abs(it.lat / 0.01 - Math.round(it.lat / 0.01)) < 1e-4 && it.accuracyM >= 1500 })
+        val r = java.util.Random(4)
+        repeat(3000) { try { LocationPayload.decodeTrack(ByteArray(r.nextInt(60)).also { b -> r.nextBytes(b) }) } catch (e: CryptoException) {} }
+        assertTrue(LocationPayload.encodeTrack(route(0, 199), Precision.EXACT).size < 3500) // fits a 4 KiB record
+    }
+
+    @Test fun a_track_gives_receivers_the_whole_route_and_missed_batches_are_backfilled() {
+        val (a, b, c) = triangle(); val all = listOf(a, b, c)
+        val t1 = now + 5 * min
+        // first batch (points 0..9) reaches everyone
+        a.engine.shareTrack(gid(a), route(0, 9), Precision.EXACT, t1); run(all, t1)
+        val atC = { c.engine.locations(gid(c)).first { it.sender == senderOf(a) } }
+        assertEquals(10, atC().trail.size)
+        // C goes offline: it misses the batch with points 10..19 sent to B only
+        val t2 = t1 + 5 * min
+        a.engine.shareTrack(gid(a), route(0, 19), Precision.EXACT, t2); run(listOf(a, b), t2)
+        assertEquals(10, atC().trail.size)
+        // the next batch repeats recent points, so C ends up with the complete, ordered route and no duplicates
+        val t3 = t2 + 5 * min
+        a.engine.shareTrack(gid(a), route(0, 29), Precision.EXACT, t3); run(all, t3)
+        val trail = atC().trail
+        assertEquals(30, trail.size)
+        assertEquals(trail.map { it.timestamp }.sorted(), trail.map { it.timestamp })
+        assertEquals(now + 29 * 30_000L, atC().latest!!.timestamp)
+        assertEquals(30, b.engine.locations(gid(b)).first { it.sender == senderOf(a) }.trail.size)
+        assertEquals(30, a.engine.locations(gid(a)).first { it.sender == senderOf(a) }.trail.size)
+    }
+
+    @Test fun an_older_batch_arriving_late_fills_the_gap_without_moving_the_latest_position() {
+        val (a, b, c) = triangle(); val all = listOf(a, b, c)
+        val t = now + 5 * min
+        a.engine.shareTrack(gid(a), route(10, 19), Precision.EXACT, t); run(all, t)
+        a.engine.shareTrack(gid(a), route(0, 9), Precision.EXACT, t + 1000); run(all, t + 1000) // late
+        val e = c.engine.locations(gid(c)).first { it.sender == senderOf(a) }
+        assertEquals(20, e.trail.size)
+        assertEquals(now + 19 * 30_000L, e.latest!!.timestamp)
+    }
+
+    @Test fun a_track_from_the_future_is_refused() {
+        val (a, b, c) = triangle(); val all = listOf(a, b, c)
+        val t = now + 5 * min
+        val future = (0..3).map { fix(t = t + 3600_000L + it * 30_000L) }
+        a.engine.shareTrack(gid(a), future, Precision.EXACT, t); run(all, t)
+        assertTrue(c.engine.locations(gid(c)).none { it.sender == senderOf(a) })
+    }
 }

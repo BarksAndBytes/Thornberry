@@ -124,7 +124,7 @@ class MainActivity : Activity() {
     }
 
     private fun home(col: LinearLayout) {
-        col.addView(label("Thornberry (test build 0.3.1)", 22f, true))
+        col.addView(label("Thornberry (test build 0.4.0)", 22f, true))
         col.addView(label("Test data only. No server. Not independently reviewed.", 12f))
         Node.loadError?.let { col.addView(label(it, 14f, true)); return }
         col.addView(label(

@@ -209,6 +209,25 @@ class ChatEngine private constructor(
         for (c in contacts.values) if (g.session.isMember(c.peerIdentity)) offerTo(c, now)
     }
 
+    /**
+     * Share the recent route (up to the last 200 fixes, oldest first) as one record. Each record repeats recent
+     * points, so a receiver that missed an earlier record (offline, slow Tor) still fills the gap from this one,
+     * provided the gap is shorter than the window. Receivers merge by time and ignore points they already have.
+     * Lives [TRACK_TTL_MS] in transit.
+     */
+    fun shareTrack(groupId: String, fixes: List<LocationFix>, precision: Precision, now: Long, ttlMs: Long = TRACK_TTL_MS) {
+        val g = groups[groupId] ?: throw CryptoException("unknown group")
+        val pts = fixes.sortedBy { it.timeMs }.distinctBy { it.timeMs }.takeLast(LocationPayload.TRACK_MAX_POINTS)
+        if (pts.isEmpty()) return
+        val body = LocationPayload.encodeTrack(pts, precision)
+        val expires = now + ttlMs
+        val wire = g.session.seal(identity, LocationPayload.KIND_TRACK, body, now, expires)
+        val me = hex(identity.public)
+        for (p in LocationPayload.decodeTrack(body)) board.update(g.id, me, p)
+        sync.addLocal(wire, expires, now)
+        for (c in contacts.values) if (g.session.isMember(c.peerIdentity)) offerTo(c, now)
+    }
+
     /** Tell the group that we paused or resumed sharing (so "paused" is not mistaken for "lost signal"). */
     fun setSharingPaused(groupId: String, paused: Boolean, now: Long) {
         val g = groups[groupId] ?: throw CryptoException("unknown group")
@@ -328,6 +347,15 @@ class ChatEngine private constructor(
                         val p = LocationPayload.decode(r.body, r.timestamp)
                         if (board.update(g.id, hex(r.sender), p)) events.add(Event.LocationUpdate(g.id, hex(r.sender), p))
                     }
+                    LocationPayload.KIND_TRACK -> {
+                        val pts = LocationPayload.decodeTrack(r.body)
+                        // Times are the sender's, inside a signed record: refuse a route that ends in the future
+                        // (the board itself drops anything older than 24 h).
+                        if (pts.last().timestamp > r.timestamp + 10 * 60_000L) throw CryptoException("track from the future")
+                        var newest: LocationPoint? = null
+                        for (p in pts) if (board.update(g.id, hex(r.sender), p)) newest = p
+                        newest?.let { events.add(Event.LocationUpdate(g.id, hex(r.sender), it)) }
+                    }
                     LocationPayload.KIND_SHARING_STATE -> {
                         if (r.body.size == 1) {
                             val paused = r.body[0].toInt() == 1
@@ -403,6 +431,7 @@ class ChatEngine private constructor(
         private val ZERO_TAG = ByteArray(16)
         const val KIND_TEXT = 1
         const val LOCATION_TTL_MS = 30L * 60_000
+        const val TRACK_TTL_MS = 2L * 3600_000
         private const val SNAPSHOT_VERSION = 2
 
         private fun hex(b: ByteArray) = b.joinToString("") { "%02x".format(it) }

@@ -58,6 +58,8 @@ class ChatService : Service() {
         private const val CONNECT_TIMEOUT_MS = 90_000
         private const val MAX_FRAME = 600_000
         private const val MAX_FRAMES_PER_CONNECTION = 64
+        /** The route sent in one batch covers the last 100 minutes (at most 200 points). */
+        private const val TRACK_WINDOW_MS = 100 * 60_000L
         private const val HS_KEY_FILE = "hs.key"
         @Volatile var running = false
     }
@@ -75,6 +77,9 @@ class ChatService : Service() {
     private val locationLoop = AtomicBoolean(false)
     private val lastSent = HashMap<String, LocationPolicy.Sent>()
     private var lastSample: Pair<Double, Double>? = null
+    /** Recent fixes (raw, in memory only). Precision is reduced per group when a route is sent. */
+    private val trackBuf = ArrayDeque<LocationFix>()
+    private val lastTrackSent = HashMap<String, Long>()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -278,6 +283,23 @@ class ChatService : Service() {
         }
     }
 
+    /**
+     * Keep a fix for the route. Poor fixes are left out (they zigzag), and while standing still we keep only one point
+     * per ten minutes. Held in memory only, for at most three hours.
+     */
+    private fun addToTrack(fix: LocationFix) {
+        if (fix.accuracyM > 150) return
+        synchronized(trackBuf) {
+            val last = trackBuf.lastOrNull()
+            if (last != null && fix.timeMs - last.timeMs < 10 * 60_000L &&
+                Geo.distanceM(last.lat, last.lon, fix.lat, fix.lon) < 15
+            ) return
+            trackBuf.addLast(fix)
+            while (trackBuf.isNotEmpty() && trackBuf.first().timeMs < fix.timeMs - 3 * 3600_000L) trackBuf.removeFirst()
+            while (trackBuf.size > 400) trackBuf.removeFirst()
+        }
+    }
+
     private fun onFix(loc: Location?) {
         var delay = 120_000L
         try {
@@ -287,13 +309,25 @@ class ChatService : Service() {
             // The battery level is used only for the sending schedule here; it is not included in what is shared.
             val fix = LocationFix(loc.latitude, loc.longitude, loc.accuracy.roundToInt(), now, if (loc.hasSpeed()) loc.speed else null, null)
             val prev = lastSample
-            val moved = prev != null && Geo.distanceM(prev.first, prev.second, fix.lat, fix.lon) > 30
-            lastSample = fix.lat to fix.lon
+            // Only a reasonably accurate fix counts as movement (GPS noise indoors is not a journey).
+            val moved = prev != null && fix.accuracyM <= 150 && Geo.distanceM(prev.first, prev.second, fix.lat, fix.lon) > 30
+            if (fix.accuracyM <= 150) lastSample = fix.lat to fix.lon
+            addToTrack(fix)
             for ((gid, precision) in Node.sharingGroups()) {
                 if (LocationPolicy.shouldSend(lastSent[gid], fix, now, battery)) {
-                    Node.use { it.shareLocation(gid, fix, precision, now) }
+                    val window = synchronized(trackBuf) { trackBuf.filter { it.timeMs >= now - TRACK_WINDOW_MS } }
+                    val fresh = window.count { it.timeMs > (lastTrackSent[gid] ?: 0L) }
+                    if (fresh >= 2) {
+                        // The batch repeats recent points so a receiver that missed an earlier update is backfilled.
+                        Node.use { it.shareTrack(gid, window, precision, now) }
+                        lastTrackSent[gid] = window.last().timeMs
+                        ChatLog.log("TRACK_SENT", "group=${gid.take(4)} precision=${precision.name} points=${window.size} fresh=$fresh")
+                    } else {
+                        Node.use { it.shareLocation(gid, fix, precision, now) }
+                        lastTrackSent[gid] = fix.timeMs
+                        ChatLog.log("LOC_SENT", "group=${gid.take(4)} precision=${precision.name} acc=${fix.accuracyM}")
+                    }
                     lastSent[gid] = LocationPolicy.Sent(fix.lat, fix.lon, now)
-                    ChatLog.log("LOC_SENT", "group=${gid.take(4)} precision=${precision.name} acc=${fix.accuracyM}")
                 }
             }
             delay = LocationPolicy.nextSampleDelayMs(moved, battery)

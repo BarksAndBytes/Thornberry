@@ -50,6 +50,10 @@ class LocationPoint(
 object LocationPayload {
     const val KIND_LOCATION = 2
     const val KIND_SHARING_STATE = 3
+    /** A batch of recent positions (the route so far), so history survives gaps in delivery. */
+    const val KIND_TRACK = 4
+    const val TRACK_MAX_POINTS = 200
+    private const val TRACK_VERSION = 1
     private const val VERSION = 1
 
     fun quantize(value: Double, grid: Double): Double =
@@ -71,6 +75,60 @@ object LocationPayload {
         if (hasSpeed) o.writeShort((fix.speedMps!! * 100).roundToInt().coerceIn(0, 65535))
         if (hasBattery) o.writeByte(fix.batteryPct!!.coerceIn(0, 100))
         return b.toByteArray()
+    }
+
+    /**
+     * Encode up to [TRACK_MAX_POINTS] fixes (oldest first, strictly increasing times) at the chosen precision.
+     * Layout: version, count (u16), first time (i64 ms), then per point: lat i32, lon i32, accuracy u16,
+     * and for every point after the first the time since the previous one (u32 ms).
+     */
+    fun encodeTrack(fixes: List<LocationFix>, precision: Precision): ByteArray {
+        require(fixes.size in 1..TRACK_MAX_POINTS) { "bad track size" }
+        for (i in 1 until fixes.size) require(fixes[i].timeMs > fixes[i - 1].timeMs) { "times must increase" }
+        val b = ByteArrayOutputStream()
+        val o = DataOutputStream(b)
+        o.writeByte(TRACK_VERSION); o.writeShort(fixes.size); o.writeLong(fixes[0].timeMs)
+        for ((i, f) in fixes.withIndex()) {
+            require(f.lat in -90.0..90.0 && f.lon in -180.0..180.0) { "bad coordinates" }
+            val lat = quantize(f.lat, precision.gridDegrees).coerceIn(-90.0, 90.0)
+            val lon = quantize(f.lon, precision.gridDegrees).coerceIn(-180.0, 180.0)
+            o.writeInt((lat * 1e6).roundToInt()); o.writeInt((lon * 1e6).roundToInt())
+            o.writeShort(max(f.accuracyM, precision.minAccuracyM).coerceIn(0, 65535))
+            if (i > 0) {
+                val dt = f.timeMs - fixes[i - 1].timeMs
+                require(dt <= 0xFFFF_FFFFL) { "gap too large" }
+                o.writeInt(dt.toInt())
+            }
+        }
+        return b.toByteArray()
+    }
+
+    /** Strict decode of a track body. Point times come from the payload (the whole record is signed by the sender). */
+    fun decodeTrack(body: ByteArray): List<LocationPoint> {
+        try {
+            val i = DataInputStream(ByteArrayInputStream(body))
+            if (i.readUnsignedByte() != TRACK_VERSION) throw CryptoException("bad track version")
+            val n = i.readUnsignedShort()
+            if (n !in 1..TRACK_MAX_POINTS) throw CryptoException("bad track size")
+            var t = i.readLong()
+            val out = ArrayList<LocationPoint>(n)
+            for (k in 0 until n) {
+                val lat = i.readInt(); val lon = i.readInt(); val acc = i.readUnsignedShort()
+                if (k > 0) {
+                    val dt = i.readInt().toLong() and 0xFFFF_FFFFL
+                    if (dt == 0L) throw CryptoException("times must increase")
+                    t += dt
+                }
+                if (lat !in -90_000_000..90_000_000 || lon !in -180_000_000..180_000_000) throw CryptoException("out of range")
+                out.add(LocationPoint(lat, lon, acc, t, null, null))
+            }
+            if (i.available() != 0) throw CryptoException("trailing bytes")
+            return out
+        } catch (e: CryptoException) {
+            throw e
+        } catch (e: Exception) {
+            throw CryptoException("malformed track")
+        }
     }
 
     /** [timestamp] comes from the verified record, not from the payload. */
@@ -134,7 +192,8 @@ object LocationPolicy {
     /** How long to wait before taking the next fix (always comfortably under the heartbeat). */
     fun nextSampleDelayMs(recentlyMoved: Boolean, batteryPct: Int?): Long {
         val low = batteryPct != null && batteryPct <= LOW_BATTERY_PCT
-        return if (recentlyMoved) (if (low) 150_000L else 120_000L) else 300_000L
+        // While moving, sample often so the route has enough points; the batch is sent every few minutes.
+        return if (recentlyMoved) (if (low) 60_000L else 30_000L) else 180_000L
     }
 }
 
@@ -147,7 +206,7 @@ class LocationBoard {
     private val members = LinkedHashMap<String, Member>() // key = groupId + ":" + sender
     companion object {
         const val TRAIL_MAX_MS = 24L * 3600 * 1000
-        const val TRAIL_MAX_POINTS = 300
+        const val TRAIL_MAX_POINTS = 1500
     }
 
     private fun m(group: String, sender: String) = members.getOrPut("$group:$sender") { Member() }
