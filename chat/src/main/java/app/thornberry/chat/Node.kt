@@ -102,6 +102,8 @@ object Node {
                     is ChatEngine.Event.GroupJoined -> notifyHook?.invoke("You were added to a group")
                     is ChatEngine.Event.RemovedFromGroup -> notifyHook?.invoke("You were removed from a group")
                     is ChatEngine.Event.GroupChanged -> {}
+                    is ChatEngine.Event.LocationUpdate -> {}
+                    is ChatEngine.Event.SharingState -> {}
                     is ChatEngine.Event.Paired -> {
                         ChatLog.log("PAIRED_BY_RESPONSE")
                         e.contact(ev.contactId)?.let { pendingPairing = ChatEngine.PairingResult(it, ev.safetyCode) }

@@ -53,6 +53,10 @@ class ChatEngine private constructor(
         class RemovedFromGroup(val groupId: String) : Event()
         /** Someone who scanned our pairing code has paired with us; show the safety code and ask to confirm. */
         class Paired(val contactId: String, val safetyCode: String) : Event()
+        /** A member's newest position arrived (already reduced to the precision they chose). */
+        class LocationUpdate(val groupId: String, val sender: String, val point: LocationPoint) : Event()
+        /** A member paused or resumed sharing. */
+        class SharingState(val groupId: String, val sender: String, val paused: Boolean) : Event()
     }
 
     /** A frame to deliver to a contact's onion address. Keep until delivery succeeds. */
@@ -67,6 +71,7 @@ class ChatEngine private constructor(
     private val sync = SyncEngine(store)
     private val pending = ArrayList<Outgoing>()
     private val events = ArrayList<Event>()
+    private val board = LocationBoard()
     private var activePairing: Pairing.Local? = null
     var droppedFrames = 0L
         private set
@@ -184,9 +189,39 @@ class ChatEngine private constructor(
         for (c in contacts.values) if (g.session.isMember(c.peerIdentity)) offerTo(c, now)
     }
 
+    // ---------------- location ----------------
+
+    /** Latest position and 24 h trail of every member who shares in this group (including us). */
+    fun locations(groupId: String): List<LocationBoard.Entry> = board.forGroup(groupId)
+
+    /**
+     * Share our position with a group at the chosen precision. The reduction happens here, before
+     * encryption. Records expire after 24 hours; receivers delete them then.
+     */
+    fun shareLocation(groupId: String, fix: LocationFix, precision: Precision, now: Long, ttlMs: Long = LocationBoard.TRAIL_MAX_MS) {
+        val g = groups[groupId] ?: throw CryptoException("unknown group")
+        val body = LocationPayload.encode(fix, precision)
+        val expires = now + ttlMs
+        val wire = g.session.seal(identity, LocationPayload.KIND_LOCATION, body, now, expires)
+        board.update(g.id, hex(identity.public), LocationPayload.decode(body, now))
+        sync.addLocal(wire, expires, now)
+        for (c in contacts.values) if (g.session.isMember(c.peerIdentity)) offerTo(c, now)
+    }
+
+    /** Tell the group that we paused or resumed sharing (so "paused" is not mistaken for "lost signal"). */
+    fun setSharingPaused(groupId: String, paused: Boolean, now: Long) {
+        val g = groups[groupId] ?: throw CryptoException("unknown group")
+        val expires = now + LocationBoard.TRAIL_MAX_MS
+        val wire = g.session.seal(identity, LocationPayload.KIND_SHARING_STATE, byteArrayOf(if (paused) 1 else 0), now, expires)
+        board.setPaused(g.id, hex(identity.public), paused, now)
+        sync.addLocal(wire, expires, now)
+        for (c in contacts.values) if (g.session.isMember(c.peerIdentity)) offerTo(c, now)
+    }
+
     /** Offer everything we hold to every contact (call periodically and when a connection comes up). */
     fun syncAll(now: Long) {
         store.purgeExpired(now)
+        board.purge(now)
         for (c in contacts.values) offerTo(c, now)
     }
 
@@ -250,7 +285,7 @@ class ChatEngine private constructor(
                 if (!existing.session.isActive) { droppedFrames++; return }
                 when (existing.session.applyUpdate(update, now, identity.public)) {
                     GroupSession.UpdateResult.APPLIED -> { syncPeers.clear(); events.add(Event.GroupChanged(gid)) }
-                    GroupSession.UpdateResult.REMOVED -> { syncPeers.clear(); events.add(Event.RemovedFromGroup(gid)) }
+                    GroupSession.UpdateResult.REMOVED -> { board.dropGroup(gid); syncPeers.clear(); events.add(Event.RemovedFromGroup(gid)) }
                     GroupSession.UpdateResult.STALE -> {}
                 }
             } else {
@@ -270,6 +305,7 @@ class ChatEngine private constructor(
         // Only an admin of that group may tell us we were removed.
         if (body.size != 16 || g == null || !g.session.isActive || !g.session.isAdmin(c.peerIdentity)) { droppedFrames++; return }
         g.session.markRemoved()
+        board.dropGroup(g.id)
         syncPeers.clear()
         events.add(Event.RemovedFromGroup(g.id))
     }
@@ -285,8 +321,18 @@ class ChatEngine private constructor(
             gotNew = true
             try {
                 val r = g.session.open(rec.wire, now)
-                if (r.kind == KIND_TEXT) {
-                    events.add(Event.GroupText(g.id, g.name, r.sender, String(r.body, Charsets.UTF_8), r.timestamp))
+                when (r.kind) {
+                    KIND_TEXT -> events.add(Event.GroupText(g.id, g.name, r.sender, String(r.body, Charsets.UTF_8), r.timestamp))
+                    LocationPayload.KIND_LOCATION -> {
+                        val p = LocationPayload.decode(r.body, r.timestamp)
+                        if (board.update(g.id, hex(r.sender), p)) events.add(Event.LocationUpdate(g.id, hex(r.sender), p))
+                    }
+                    LocationPayload.KIND_SHARING_STATE -> {
+                        if (r.body.size == 1) {
+                            val paused = r.body[0].toInt() == 1
+                            if (board.setPaused(g.id, hex(r.sender), paused, r.timestamp)) events.add(Event.SharingState(g.id, hex(r.sender), paused))
+                        }
+                    }
                 }
             } catch (e: CryptoException) {
                 droppedFrames++ // kept in the store for relaying, but not shown
@@ -322,11 +368,13 @@ class ChatEngine private constructor(
     // ---------------- persistence ----------------
 
     /** Everything, including secret keys. The app must store this only encrypted (Android Keystore). */
-    fun snapshot(): ByteArray {
+    fun snapshot(): ByteArray = snapshot(true)
+
+    internal fun snapshot(includeBoard: Boolean): ByteArray {
         val b = ByteArrayOutputStream()
         val o = DataOutputStream(b)
         fun bytes(x: ByteArray) { o.writeInt(x.size); o.write(x) }
-        o.writeByte(SNAPSHOT_VERSION)
+        o.writeByte(if (includeBoard) SNAPSHOT_VERSION else 1)
         bytes(identity.private); bytes(identity.public)
         o.writeInt(contacts.size)
         for (c in contacts.values) {
@@ -341,6 +389,7 @@ class ChatEngine private constructor(
         for (r in recs) { bytes(r.id); bytes(r.groupId); bytes(r.wire); o.writeLong(r.expiresAt) }
         o.writeInt(pending.size)
         for (p in pending) { bytes(p.toOnion.toByteArray()); bytes(p.contactId.toByteArray()); bytes(p.frame) }
+        if (includeBoard) bytes(board.serialize())
         return b.toByteArray()
     }
 
@@ -352,13 +401,14 @@ class ChatEngine private constructor(
         const val TYPE_GROUP_REMOVED = 5
         private val ZERO_TAG = ByteArray(16)
         const val KIND_TEXT = 1
-        private const val SNAPSHOT_VERSION = 1
+        private const val SNAPSHOT_VERSION = 2
 
         private fun hex(b: ByteArray) = b.joinToString("") { "%02x".format(it) }
 
         fun restore(data: ByteArray): ChatEngine = try {
             val i = DataInputStream(ByteArrayInputStream(data))
-            if (i.readUnsignedByte() != SNAPSHOT_VERSION) throw CryptoException("bad snapshot version")
+            val version = i.readUnsignedByte()
+            if (version != 1 && version != 2) throw CryptoException("bad snapshot version")
             fun bytes(): ByteArray = ByteArray(i.readInt().also { require(it in 0..2_000_000) }).also { i.readFully(it) }
             val priv = bytes(); val pub = bytes()
             val e = ChatEngine(Crypto.KeyPair(priv, pub), InMemoryRecordStore())
@@ -377,6 +427,7 @@ class ChatEngine private constructor(
             repeat(i.readInt().also { require(it in 0..1_000_000) }) {
                 e.pending.add(Outgoing(String(bytes()), String(bytes()), bytes()))
             }
+            if (version >= 2) e.board.restoreFrom(bytes())
             require(i.available() == 0)
             e
         } catch (e: CryptoException) {
