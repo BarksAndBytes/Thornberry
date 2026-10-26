@@ -290,7 +290,7 @@ class GroupSession private constructor(
         val newVersion = version + 1
         val body = encodeUpdateBody(groupId, newEpoch, newVersion, newKey, newMembers, newAdmins, now, admin.public)
         val update = body + Crypto.sign(admin.private, UPD_PREFIX + body)
-        applyUpdate(update, now) // the issuer adopts it the same way every member will
+        applyUpdate(update, now, admin.public) // the issuer adopts it the same way every member will
         return update
     }
 
@@ -318,7 +318,7 @@ class GroupSession private constructor(
     }
 
     /** Apply a signed update received from an admin. Throws [CryptoException] if it is invalid or conflicts. */
-    fun applyUpdate(update: ByteArray, now: Long, ownIdentityPublic: ByteArray? = null): UpdateResult {
+    fun applyUpdate(update: ByteArray, now: Long, ownIdentityPublic: ByteArray): UpdateResult {
         val u = parseUpdate(update)
         if (!Crypto.constantTimeEquals(u.groupId, groupId)) throw CryptoException("wrong group")
         if (!active) throw CryptoException("group is not active")
@@ -333,7 +333,7 @@ class GroupSession private constructor(
         if (u.epoch < epoch) throw CryptoException("epoch rollback")
         if (u.epoch == epoch && !Crypto.constantTimeEquals(u.key, key)) throw CryptoException("key changed without new epoch")
 
-        if (ownIdentityPublic != null && !contains(u.members, ownIdentityPublic)) {
+        if (!contains(u.members, ownIdentityPublic)) {
             // We were removed: forget everything secret about this group.
             key = ByteArray(32); prevKey = null; active = false
             members = emptyList(); admins = emptyList()
