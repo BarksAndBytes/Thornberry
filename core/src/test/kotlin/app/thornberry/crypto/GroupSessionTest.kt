@@ -7,6 +7,8 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
+private typealias UpdateResult = GroupSession.UpdateResult
+
 class GroupSessionTest {
     private val now = 1_000_000_000_000L
     private val hour = 3_600_000L
@@ -26,7 +28,6 @@ class GroupSessionTest {
         assertEquals(UpdateResult.APPLIED, bobS.applyUpdate(u2, now, bob.public))
         return Setup(admin, bob, carol, a, bobS, carolS)
     }
-    private typealias UpdateResult = GroupSession.UpdateResult
 
     @Test fun records_flow_between_members() {
         val s = threeMembers()
@@ -46,13 +47,11 @@ class GroupSessionTest {
         assertFailsWith<CryptoException> { s.bobS.seal(s.bob, 1, ByteArray(9000), now, now + hour) }
     }
 
-    @Test fun key_holder_who_is_not_a_member_cannot_forge() {
+    @Test fun records_from_another_group_are_rejected() {
         val s = threeMembers()
         val outsider = Crypto.ed25519Generate()
-        // Malicious member who leaked the key: another group object with the same key but outsider as "member".
-        // Simulated by a member signing with someone else's identity is impossible; outsider signing is rejected:
-        val rogue = GroupSession.create(outsider)
-        assertFailsWith<CryptoException> { s.carolS.open(rogue.seal(outsider, 1, b("x"), now, now + hour), now) }
+        val other = GroupSession.create(outsider)
+        assertFailsWith<CryptoException> { s.carolS.open(other.seal(outsider, 1, b("x"), now, now + hour), now) }
     }
 
     @Test fun replay_expired_and_future_records_rejected() {
@@ -137,9 +136,6 @@ class GroupSessionTest {
             val t = u.copyOf().also { it[i] = (it[i].toInt() xor 1).toByte() }
             assertFailsWith<CryptoException>("byte $i") { s.bobS.applyUpdate(t, now, s.bob.public) }
         }
-        // A member (not admin) signing their own update is refused.
-        val rogue = GroupSession.join(s.a.addMember(s.admin, Crypto.ed25519Generate().public, now).let { s.a.rotate(s.admin, now) }, s.admin, s.admin.public)
-        assertTrue(rogue.isAdmin(s.admin.public))
     }
 
     @Test fun conflicting_updates_at_the_same_version_are_rejected() {
