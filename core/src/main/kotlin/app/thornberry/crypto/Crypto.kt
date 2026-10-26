@@ -88,6 +88,12 @@ object Crypto {
         return ByteArray(length).also { g.generateBytes(it, 0, length) }
     }
 
+    fun sha256(data: ByteArray): ByteArray {
+        val d = SHA256Digest()
+        d.update(data, 0, data.size)
+        return ByteArray(d.digestSize).also { d.doFinal(it, 0) }
+    }
+
     // ---- HMAC-SHA256 (RFC 2104 / 4231) ----
     fun hmacSha256(key: ByteArray, data: ByteArray): ByteArray {
         val m = HMac(SHA256Digest())
