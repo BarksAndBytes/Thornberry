@@ -58,8 +58,8 @@ class ChatService : Service() {
         private const val CONNECT_TIMEOUT_MS = 90_000
         private const val MAX_FRAME = 600_000
         private const val MAX_FRAMES_PER_CONNECTION = 64
-        /** The route sent in one batch covers the last 100 minutes (at most 200 points). */
-        private const val TRACK_WINDOW_MS = 100 * 60_000L
+        /** The route sent in one batch covers the last 75 minutes (at most 300 points). */
+        private const val TRACK_WINDOW_MS = 75 * 60_000L
         private const val HS_KEY_FILE = "hs.key"
         @Volatile var running = false
     }
@@ -296,7 +296,7 @@ class ChatService : Service() {
             ) return
             trackBuf.addLast(fix)
             while (trackBuf.isNotEmpty() && trackBuf.first().timeMs < fix.timeMs - 3 * 3600_000L) trackBuf.removeFirst()
-            while (trackBuf.size > 400) trackBuf.removeFirst()
+            while (trackBuf.size > 600) trackBuf.removeFirst()
         }
     }
 
@@ -310,7 +310,8 @@ class ChatService : Service() {
             val fix = LocationFix(loc.latitude, loc.longitude, loc.accuracy.roundToInt(), now, if (loc.hasSpeed()) loc.speed else null, null)
             val prev = lastSample
             // Only a reasonably accurate fix counts as movement (GPS noise indoors is not a journey).
-            val moved = prev != null && fix.accuracyM <= 150 && Geo.distanceM(prev.first, prev.second, fix.lat, fix.lon) > 30
+            val moved = fix.accuracyM <= 150 && ((prev != null && Geo.distanceM(prev.first, prev.second, fix.lat, fix.lon) > 20) ||
+                (fix.speedMps != null && fix.speedMps!! > 0.8f))
             if (fix.accuracyM <= 150) lastSample = fix.lat to fix.lon
             addToTrack(fix)
             for ((gid, precision) in Node.sharingGroups()) {

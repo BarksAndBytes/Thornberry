@@ -66,19 +66,19 @@ class LocationTest {
         val last = LocationPolicy.Sent(40.0, -74.0, now)
         assertTrue(LocationPolicy.shouldSend(null, fix(), now, 90))
         // stationary: nothing until the heartbeat
-        assertFalse(LocationPolicy.shouldSend(last, fix(40.0, -74.0), now + 5 * min, 90))
-        assertTrue(LocationPolicy.shouldSend(last, fix(40.0, -74.0), now + 10 * min, 90))
+        assertFalse(LocationPolicy.shouldSend(last, fix(40.0, -74.0), now + 3 * min, 90))
+        assertTrue(LocationPolicy.shouldSend(last, fix(40.0, -74.0), now + 5 * min, 90))
         // moved 300 m: only after the minimum moving interval
         val moved = fix(40.0027, -74.0)
         assertFalse(LocationPolicy.shouldSend(last, moved, now + 1 * min, 90))
-        assertTrue(LocationPolicy.shouldSend(last, moved, now + 3 * min, 90))
-        // low battery stretches the moving interval, but never past the 10 minute heartbeat
-        assertFalse(LocationPolicy.shouldSend(last, moved, now + 3 * min, 10))
-        assertTrue(LocationPolicy.shouldSend(last, moved, now + 5 * min, 10))
-        assertTrue(LocationPolicy.shouldSend(last, fix(40.0, -74.0), now + 10 * min, 5))
+        assertTrue(LocationPolicy.shouldSend(last, moved, now + 2 * min, 90))
+        // low battery stretches the moving interval, but never past the 5 minute heartbeat
+        assertFalse(LocationPolicy.shouldSend(last, moved, now + 2 * min, 10))
+        assertTrue(LocationPolicy.shouldSend(last, moved, now + 4 * min, 10))
+        assertTrue(LocationPolicy.shouldSend(last, fix(40.0, -74.0), now + 5 * min, 5))
         // a poor fix does not trigger an early update, but the heartbeat still goes out
         assertFalse(LocationPolicy.shouldSend(last, fix(40.0027, -74.0, acc = 2000), now + 4 * min, 90))
-        assertTrue(LocationPolicy.shouldSend(last, fix(40.0027, -74.0, acc = 2000), now + 11 * min, 90))
+        assertTrue(LocationPolicy.shouldSend(last, fix(40.0027, -74.0, acc = 2000), now + 6 * min, 90))
         // small jitter (30 m) is not movement
         assertFalse(LocationPolicy.shouldSend(last, fix(40.00027, -74.0), now + 4 * min, 90))
         assertTrue(LocationPolicy.nextSampleDelayMs(false, 90) < LocationPolicy.HEARTBEAT_MS)
@@ -219,14 +219,14 @@ class LocationTest {
         // a zero time step is refused (times must increase)
         assertFailsWith<CryptoException> { LocationPayload.decodeTrack(body.copyOf().also { for (k in 0 until 4) it[31 + k] = 0 }) }
         assertFailsWith<IllegalArgumentException> { LocationPayload.encodeTrack(emptyList(), Precision.EXACT) }
-        assertFailsWith<IllegalArgumentException> { LocationPayload.encodeTrack(route(0, 200), Precision.EXACT) }
+        assertFailsWith<IllegalArgumentException> { LocationPayload.encodeTrack(route(0, 300), Precision.EXACT) }
         assertFailsWith<IllegalArgumentException> { LocationPayload.encodeTrack(listOf(fix(t = now + 5), fix(t = now)), Precision.EXACT) }
         // coarse precision applies to every point
         val coarse = LocationPayload.decodeTrack(LocationPayload.encodeTrack(fixes, Precision.AREA))
         assertTrue(coarse.all { abs(it.lat / 0.01 - Math.round(it.lat / 0.01)) < 1e-4 && it.accuracyM >= 1500 })
         val r = java.util.Random(4)
         repeat(3000) { try { LocationPayload.decodeTrack(ByteArray(r.nextInt(60)).also { b -> r.nextBytes(b) }) } catch (e: CryptoException) {} }
-        assertTrue(LocationPayload.encodeTrack(route(0, 199), Precision.EXACT).size < 3500) // fits a 4 KiB record
+        assertTrue(LocationPayload.encodeTrack(route(0, 299), Precision.EXACT).size < 4500) // fits an 8 KiB record
     }
 
     @Test fun a_track_gives_receivers_the_whole_route_and_missed_batches_are_backfilled() {

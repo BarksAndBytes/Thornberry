@@ -38,8 +38,8 @@ android {
         applicationId = "app.thornberry.chat"
         minSdk = 30
         targetSdk = 35
-        versionCode = 11
-        versionName = "0.5.1-test"
+        versionCode = 12
+        versionName = "0.5.2-test"
         ndk { abiFilters += listOf("arm64-v8a") }
     }
 

@@ -544,13 +544,16 @@ class MainActivity : Activity() {
             }
             if (head.childCount > 0) bubble.addView(head)
         }
-        bubble.addView(TextView(this).apply {
+        val body = TextView(this).apply {
             text = m.text; textSize = 16f; setTextColor(if (mine) Color.WHITE else th.text)
-            maxWidth = (resources.displayMetrics.widthPixels * 0.72).toInt()
-            // A little slack on the right: on some phones/fonts a text view measured to its exact width clips the last letter.
-            setPadding(0, 0, dp(4), 0)
             includeFontPadding = false
-        })
+        }
+        // Give the text an explicit width taken from its own paint plus slack. (Letting the view size itself clipped the
+        // last letter on this phone, and a TextView clips to its content area, so padding does not help.)
+        val maxTextW = (resources.displayMetrics.widthPixels * 0.72).toInt()
+        val widest = m.text.split('\n').maxOf { body.paint.measureText(it) }
+        val textW = minOf(Math.ceil(widest.toDouble()).toInt() + dp(12), maxTextW)
+        bubble.addView(body, LinearLayout.LayoutParams(textW, ViewGroup.LayoutParams.WRAP_CONTENT))
         bubble.addView(TextView(this).apply {
             text = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(m.ts)); textSize = 11f
             setTextColor(if (mine) 0xB3FFFFFF.toInt() else th.textDim)
@@ -748,7 +751,7 @@ class MainActivity : Activity() {
     // ------------------------------------------------------------ settings
 
     private fun settingsScreen() {
-        topBar("Settings", "Thornberry test build 0.5.1", onBack = { go(Screen.Home) })
+        topBar("Settings", "Thornberry test build 0.5.2", onBack = { go(Screen.Home) })
         val col = scrollColumn()
         col.addView(label("Test data only. No server. Not independently reviewed.", 12f, dim = true))
         col.addView(label(

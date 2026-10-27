@@ -52,7 +52,7 @@ object LocationPayload {
     const val KIND_SHARING_STATE = 3
     /** A batch of recent positions (the route so far), so history survives gaps in delivery. */
     const val KIND_TRACK = 4
-    const val TRACK_MAX_POINTS = 200
+    const val TRACK_MAX_POINTS = 300
     private const val TRACK_VERSION = 1
     private const val VERSION = 1
 
@@ -170,10 +170,10 @@ object Geo {
  * applies whenever the phone has any fix at all.
  */
 object LocationPolicy {
-    const val MOVE_THRESHOLD_M = 75.0
-    const val MOVING_INTERVAL_MS = 3 * 60_000L
-    const val MOVING_INTERVAL_LOW_BATTERY_MS = 5 * 60_000L
-    const val HEARTBEAT_MS = 10 * 60_000L
+    const val MOVE_THRESHOLD_M = 50.0
+    const val MOVING_INTERVAL_MS = 2 * 60_000L
+    const val MOVING_INTERVAL_LOW_BATTERY_MS = 4 * 60_000L
+    const val HEARTBEAT_MS = 5 * 60_000L
     const val POOR_FIX_M = 500
     const val LOW_BATTERY_PCT = 15
 
@@ -193,7 +193,7 @@ object LocationPolicy {
     fun nextSampleDelayMs(recentlyMoved: Boolean, batteryPct: Int?): Long {
         val low = batteryPct != null && batteryPct <= LOW_BATTERY_PCT
         // While moving, sample often so the route has enough points; the batch is sent every few minutes.
-        return if (recentlyMoved) (if (low) 60_000L else 30_000L) else 180_000L
+        return if (recentlyMoved) (if (low) 30_000L else 15_000L) else 90_000L
     }
 }
 
