@@ -107,7 +107,21 @@ class MapView(ctx: Context) : View(ctx) {
 
     fun setMarkers(list: List<Marker>) {
         markers = list
+        applyFocus() // sets needFit=false when it succeeds
         if (needFit && width > 0 && list.isNotEmpty()) fit()
+        invalidate()
+    }
+
+    private var pendingFocus: String? = null
+
+    /** Centre on one person (now, or as soon as their position is known). */
+    fun focus(id: String?) { pendingFocus = id; applyFocus() }
+
+    private fun applyFocus() {
+        val id = pendingFocus ?: return
+        val m = markers.firstOrNull { it.id == id } ?: return
+        pendingFocus = null; needFit = false; userMoved = true
+        centerLat = m.lat; centerLon = m.lon; zoom = max(zoom, 15.0).coerceAtMost(MAX_ZOOM)
         invalidate()
     }
 

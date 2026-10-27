@@ -13,63 +13,113 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.text.InputType
+import android.text.TextUtils
 import android.util.Base64
+import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowInsets
+import android.view.WindowInsetsController
 import android.view.WindowManager
+import android.widget.BaseAdapter
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ListView
+import android.widget.PopupMenu
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
-import app.thornberry.crypto.ChatEngine
+import app.thornberry.crypto.Precision
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
+import com.google.zxing.integration.android.IntentIntegrator
 import com.google.zxing.qrcode.QRCodeWriter
 import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
-import com.google.zxing.integration.android.IntentIntegrator
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/** Programmatic UI: Home, Pairing, Chat. Test build; plain on purpose. */
+/**
+ * Programmatic UI in a familiar messaging layout: chat list, conversation with bubbles, a map reached by tapping a
+ * person (avatar, name or location chip), settings. Test build; no XML layouts on purpose.
+ */
 class MainActivity : Activity() {
 
     private sealed class Screen {
         object Home : Screen()
         object Pair : Screen()
+        object Settings : Screen()
         class Chat(val conv: String) : Screen()
-        class Map(val groupId: String) : Screen()
+        class Map(val conv: String, val focus: String?) : Screen()
     }
 
-    private var mapView: MapView? = null
-    private var mapInfo: TextView? = null
+    private sealed class ChatItem {
+        class Day(val text: String) : ChatItem()
+        class Message(val m: Msg, val header: Boolean) : ChatItem()
+    }
+
+    private class ChatRow(val conv: String, val name: String, val id: String, val note: String) { var last: Msg? = null }
+
+    private lateinit var th: Theme
+    private lateinit var shell: LinearLayout
+    private var insetTop = 0
+    private var topBarView: LinearLayout? = null
+    private var barSubtitle: TextView? = null
 
     private var screen: Screen = Screen.Home
-    private lateinit var root: ScrollView
-    private var chatLog: TextView? = null
-    private var chatScroll: ScrollView? = null
     private var pairName = "Contact"
     private var confirmName: String? = null
-    private val refresh: () -> Unit = { render(keepInput = true) }
+    private var chatInputText = ""
+
+    // chat screen
+    private var chatList: ListView? = null
+    private var chatBanner: TextView? = null
+    private var chatAdapter: ChatAdapter? = null
+    private var chatConv = ""
+
+    // map screen
+    private var mapView: MapView? = null
+    private var peopleBox: LinearLayout? = null
+    private var mapConv = ""
+
+    private val refresh: () -> Unit = {
+        if (Node.pendingPairing != null && screen !is Screen.Pair) render()
+        else when (screen) {
+            is Screen.Chat -> refreshChat()
+            is Screen.Map -> refreshMap()
+            else -> render()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Hides the screen from screenshots, screen recording and the recent-apps preview
-        // (pairing QR codes contain secrets).
+        // (pairing QR codes contain secrets, and so do conversations).
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         Node.init(this)
-        root = ScrollView(this).apply {
-            val pad = dp(16)
+        th = Theme(Ui.isDark(this))
+        shell = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(th.bg)
             setOnApplyWindowInsetsListener { v, insets ->
                 val bars = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.ime())
-                v.setPadding(pad + bars.left, pad + bars.top, pad + bars.right, pad + bars.bottom)
+                insetTop = bars.top
+                v.setPadding(bars.left, 0, bars.right, bars.bottom)
+                topBarView?.setPadding(dp(4), insetTop, dp(4), 0)
                 insets
             }
         }
-        setContentView(root)
+        setContentView(shell)
+        try {
+            window.insetsController?.setSystemBarsAppearance(
+                if (th.dark) 0 else WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
+                WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
+            )
+        } catch (_: Exception) {}
         if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
@@ -77,127 +127,572 @@ class MainActivity : Activity() {
         render()
     }
 
-    override fun onResume() { super.onResume(); Node.listeners.add(refresh); render(keepInput = true) }
+    override fun onResume() { super.onResume(); Node.listeners.add(refresh); render() }
     override fun onPause() { Node.listeners.remove(refresh); super.onPause() }
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        val cur = screen
-        if (cur is Screen.Map) { go(Screen.Chat("g:${cur.groupId}")); return }
-        if (screen is Screen.Home) super.onBackPressed() else {
-            if (screen is Screen.Pair) Node.cancelPairing()
-            Node.pendingPairing = null; confirmName = null
-            go(Screen.Home)
+        when (val s = screen) {
+            is Screen.Home -> super.onBackPressed()
+            is Screen.Map -> go(Screen.Chat(s.conv))
+            else -> {
+                if (s is Screen.Pair) Node.cancelPairing()
+                Node.pendingPairing = null; confirmName = null
+                go(Screen.Home)
+            }
         }
     }
 
-    private fun go(s: Screen) { screen = s; chatLog = null; mapView = null; mapInfo = null; render() }
+    private fun go(s: Screen) {
+        val prev = screen
+        val keepsDraft = s is Screen.Chat && ((prev as? Screen.Chat)?.conv == s.conv || (prev as? Screen.Map)?.conv == s.conv)
+        if (s is Screen.Chat && !keepsDraft) chatInputText = ""
+        screen = s
+        render()
+    }
 
     // ------------------------------------------------------------ rendering
 
-    private var chatInputText = ""
-
-    private fun render(keepInput: Boolean = false) {
-        if (screen is Screen.Chat && keepInput && chatLog != null) { updateChatLog(); return }
-        if (screen is Screen.Map && keepInput && mapView != null) { refreshMap(); return }
+    private fun render() {
         // A pairing finished (here, or by someone scanning our code): always show its safety code.
         if (Node.pendingPairing != null && screen !is Screen.Pair) screen = Screen.Pair
-        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        root.removeAllViews(); root.addView(col)
+        shell.removeAllViews()
+        topBarView = null; barSubtitle = null; chatList = null; chatBanner = null; chatAdapter = null
+        mapView = null; peopleBox = null
         when (val s = screen) {
-            is Screen.Home -> home(col)
-            is Screen.Pair -> pair(col)
-            is Screen.Chat -> chat(col, s.conv)
-            is Screen.Map -> mapScreen(col, s.groupId)
+            is Screen.Home -> homeScreen()
+            is Screen.Pair -> pairScreen()
+            is Screen.Settings -> settingsScreen()
+            is Screen.Chat -> chatScreen(s.conv)
+            is Screen.Map -> mapScreen(s.conv, s.focus)
         }
     }
 
-    private fun label(text: String, size: Float = 14f, bold: Boolean = false, mono: Boolean = false) = TextView(this).apply {
-        this.text = text; textSize = size
-        if (bold) setTypeface(typeface, Typeface.BOLD)
-        if (mono) typeface = Typeface.MONOSPACE
-        setPadding(0, dp(4), 0, dp(4))
+    // ------------------------------------------------------------ small view helpers
+
+    private fun label(text: String, size: Float = 14f, bold: Boolean = false, mono: Boolean = false, dim: Boolean = false) =
+        TextView(this).apply {
+            this.text = text; textSize = size
+            setTextColor(if (dim) th.textDim else th.text)
+            if (bold) setTypeface(typeface, Typeface.BOLD)
+            if (mono) typeface = Typeface.MONOSPACE
+            setPadding(0, dp(4), 0, dp(4))
+        }
+
+    private fun button(text: String, filled: Boolean = true, onClick: () -> Unit) = Button(this).apply {
+        this.text = text; isAllCaps = false; stateListAnimator = null
+        setTextColor(if (filled) Color.WHITE else th.link)
+        background = if (filled) Ui.rounded(th.primary, dp(24)) else Ui.rounded(th.tint(th.primary, 0x22), dp(24))
+        setPadding(dp(18), dp(10), dp(18), dp(10))
+        setOnClickListener { onClick() }
     }
 
-    private fun button(text: String, onClick: () -> Unit) = Button(this).apply {
-        this.text = text; isAllCaps = false; setOnClickListener { onClick() }
+    private fun LinearLayout.addButton(text: String, filled: Boolean = true, onClick: () -> Unit) {
+        addView(button(text, filled, onClick), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
     }
 
-    private fun home(col: LinearLayout) {
-        col.addView(label("Thornberry (test build 0.4.0)", 22f, true))
-        col.addView(label("Test data only. No server. Not independently reviewed.", 12f))
-        Node.loadError?.let { col.addView(label(it, 14f, true)); return }
-        col.addView(label(
-            "Tor: ${Node.torState}\nMy address: ${if (Node.onion.isEmpty()) "(not published yet)" else Node.onion.take(12) + "…"}\n" +
-                "Crypto self-test on this phone: ${Node.selfTest}", 12f, mono = true,
+    private fun avatar(name: String, id: String, sizeDp: Int) = TextView(this).apply {
+        text = (name.trim().firstOrNull()?.uppercase() ?: "?")
+        textSize = sizeDp * 0.4f; setTextColor(Color.WHITE); setTypeface(typeface, Typeface.BOLD)
+        gravity = Gravity.CENTER; background = Ui.circle(th.colorFor(id))
+        layoutParams = LinearLayout.LayoutParams(dp(sizeDp), dp(sizeDp))
+    }
+
+    private fun iconText(glyph: String, sizeSp: Float, onClick: (View) -> Unit) = TextView(this).apply {
+        text = glyph; textSize = sizeSp; setTextColor(th.onPrimary); gravity = Gravity.CENTER
+        setPadding(dp(12), dp(14), dp(12), dp(14))
+        setOnClickListener { onClick(it) }
+    }
+
+    private fun topBar(
+        title: String, subtitle: String? = null, onBack: (() -> Unit)? = null,
+        avatarOf: kotlin.Pair<String, String>? = null, onTitle: (() -> Unit)? = null,
+        actions: List<kotlin.Pair<String, (View) -> Unit>> = emptyList(),
+    ) {
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(th.primary); elevation = dp(4).toFloat()
+            setPadding(dp(4), insetTop, dp(4), 0)
+        }
+        if (onBack != null) bar.addView(iconText("←", 24f) { onBack() }) else bar.addView(View(this), LinearLayout.LayoutParams(dp(12), 1))
+        if (avatarOf != null) {
+            bar.addView(avatar(avatarOf.first, avatarOf.second, 38), LinearLayout.LayoutParams(dp(38), dp(38)).apply { rightMargin = dp(10) })
+        }
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(8), 0, dp(8)) }
+        col.addView(TextView(this).apply {
+            text = title; textSize = 18f; setTextColor(th.onPrimary); setTypeface(typeface, Typeface.BOLD)
+            isSingleLine = true; ellipsize = TextUtils.TruncateAt.END
+        })
+        val sub = TextView(this).apply {
+            text = subtitle ?: ""; textSize = 12f; setTextColor(th.onPrimaryDim)
+            isSingleLine = true; ellipsize = TextUtils.TruncateAt.END
+            visibility = if (subtitle.isNullOrEmpty()) View.GONE else View.VISIBLE
+        }
+        col.addView(sub)
+        barSubtitle = sub
+        if (onTitle != null) col.setOnClickListener { onTitle() }
+        bar.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        for ((g, f) in actions) bar.addView(iconText(g, 22f, f))
+        topBarView = bar
+        shell.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+    }
+
+    private fun setSubtitle(text: String?) {
+        barSubtitle?.apply { this.text = text ?: ""; visibility = if (text.isNullOrEmpty()) View.GONE else View.VISIBLE }
+    }
+
+    private fun scrollColumn(): LinearLayout {
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(12), dp(16), dp(24)) }
+        val sv = ScrollView(this).apply { addView(col) }
+        shell.addView(sv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        return col
+    }
+
+    private fun timeLabel(ts: Long): String {
+        val now = System.currentTimeMillis()
+        val day = 24L * 3600_000
+        val sameDay = SimpleDateFormat("yyyyMMdd", Locale.US).let { it.format(Date(ts)) == it.format(Date(now)) }
+        return if (sameDay) SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(ts))
+        else if (now - ts < 6 * day) SimpleDateFormat("EEE", Locale.getDefault()).format(Date(ts))
+        else SimpleDateFormat("MMM d", Locale.getDefault()).format(Date(ts))
+    }
+
+    // ------------------------------------------------------------ chat list
+
+    private fun homeScreen() {
+        val status = when {
+            Node.loadError != null -> "Locked"
+            Node.torState == "CONNECTED" -> "Connected through Tor"
+            else -> "Connecting… (${Node.torState.lowercase()})"
+        }
+        topBar("Thornberry", status, actions = listOf("⚙" to { _: View -> go(Screen.Settings) }))
+        val frame = FrameLayout(this)
+        shell.addView(frame, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        frame.addView(ScrollView(this).apply { addView(list) }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
+        Node.loadError?.let {
+            list.addView(label(it, 15f, true).apply { setPadding(dp(16), dp(24), dp(16), dp(8)) })
+            return
+        }
+        val rows = Node.read { e ->
+            e.contactList().map { ChatRow("c:${it.id}", it.name, it.id, if (it.verified) "" else "not verified") } +
+                e.groupList().filter { !Node.isDmName(it.name) }.map { ChatRow("g:${it.id}", it.name, it.id, if (it.session.isActive) "" else "removed") }
+        }
+        rows.forEach { it.last = Node.messages(it.conv).lastOrNull() }
+        val sorted = rows.sortedWith(compareByDescending<ChatRow> { it.last?.ts ?: 0L }.thenBy { it.name.lowercase() })
+        if (sorted.isEmpty()) {
+            val empty = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; setPadding(dp(32), dp(80), dp(32), 0) }
+            empty.addView(label("No chats yet", 20f, true))
+            empty.addView(label("Pair with someone in person to start chatting and sharing locations. No account, no server.", 14f, dim = true).apply { gravity = Gravity.CENTER })
+            empty.addButton("Add contact (pair in person)") { go(Screen.Pair) }
+            list.addView(empty)
+        }
+        for (r in sorted) {
+            list.addView(chatRowView(r))
+            list.addView(View(this).apply { setBackgroundColor(th.divider) }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1).apply { leftMargin = dp(76) })
+        }
+
+        val fab = TextView(this).apply {
+            text = "+"; textSize = 30f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
+            background = Ui.circle(th.primary); elevation = dp(6).toFloat()
+            setOnClickListener {
+                PopupMenu(this@MainActivity, it).apply {
+                    menu.add("Add contact (pair in person)"); menu.add("New group")
+                    setOnMenuItemClickListener { mi ->
+                        if (mi.title.toString().startsWith("Add")) go(Screen.Pair) else newGroupDialog()
+                        true
+                    }
+                }.show()
+            }
+        }
+        frame.addView(fab, FrameLayout.LayoutParams(dp(58), dp(58), Gravity.BOTTOM or Gravity.END).apply { setMargins(0, 0, dp(18), dp(18)) })
+    }
+
+    private fun chatRowView(r: ChatRow): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), dp(12), dp(16), dp(12)); setOnClickListener { go(Screen.Chat(r.conv)) }
+        }
+        row.addView(avatar(r.name, r.id, 48), LinearLayout.LayoutParams(dp(48), dp(48)).apply { rightMargin = dp(14) })
+        val mid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        mid.addView(TextView(this).apply {
+            text = r.name + if (r.note.isNotEmpty()) "  ·  ${r.note}" else ""
+            textSize = 16f; setTextColor(th.text); setTypeface(typeface, Typeface.BOLD); isSingleLine = true; ellipsize = TextUtils.TruncateAt.END
+        })
+        val last = r.last
+        mid.addView(TextView(this).apply {
+            text = if (last == null) "No messages yet" else (if (last.outgoing) "You: " else "") + last.text.replace('\n', ' ')
+            textSize = 14f; setTextColor(th.textDim); isSingleLine = true; ellipsize = TextUtils.TruncateAt.END
+        })
+        row.addView(mid, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val right = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.END }
+        if (last != null) right.addView(TextView(this).apply { text = timeLabel(last.ts); textSize = 12f; setTextColor(th.textDim) })
+        if (Node.sharePrecisionFor(r.conv) != null) right.addView(TextView(this).apply { text = "📍"; textSize = 12f })
+        row.addView(right)
+        return row
+    }
+
+    // ------------------------------------------------------------ conversation
+
+    private fun presenceMap(conv: String): Map<String, kotlin.Pair<Long, Boolean>> {
+        val now = System.currentTimeMillis()
+        val out = HashMap<String, kotlin.Pair<Long, Boolean>>()
+        for (en in Node.locationEntries(conv)) {
+            val p = en.latest
+            if (en.paused) out[en.sender] = (-1L) to true
+            else if (p != null) out[en.sender] = ((now - p.timestamp) / 60_000L).coerceAtLeast(0) to false
+        }
+        return out
+    }
+
+    private fun presenceText(pr: kotlin.Pair<Long, Boolean>): String = when {
+        pr.second -> "📍 paused"
+        pr.first < 1 -> "📍 now"
+        pr.first < 60 -> "📍 ${pr.first} min ago"
+        else -> "📍 ${pr.first / 60} h ago"
+    }
+
+    private fun chatScreen(conv: String) {
+        chatConv = conv
+        val isGroup = conv.startsWith("g:")
+        val id = conv.substring(2)
+        val title = Node.read { e -> if (isGroup) e.group(id)?.name ?: "Group" else e.contact(id)?.name ?: "Contact" }
+        topBar(
+            title, chatSubtitle(conv), onBack = { go(Screen.Home) }, avatarOf = title to id,
+            onTitle = { go(Screen.Map(conv, if (isGroup) null else id)) },
+            actions = listOf(
+                "📍" to { _: View -> go(Screen.Map(conv, null)) },
+                "⋮" to { v: View -> chatMenu(v, conv, isGroup) },
+            ),
+        )
+        val banner = TextView(this).apply {
+            textSize = 13f; setTextColor(th.live); setPadding(dp(16), dp(8), dp(16), dp(8))
+            setBackgroundColor(th.tint(th.live, 0x22)); setOnClickListener { shareDialog(conv) }
+        }
+        chatBanner = banner
+        shell.addView(banner, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        val adapter = ChatAdapter(conv, isGroup)
+        chatAdapter = adapter
+        val list = ListView(this).apply {
+            divider = null; dividerHeight = 0; selector = android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)
+            cacheColorHint = Color.TRANSPARENT; setBackgroundColor(th.bg); isFocusable = false
+            this.adapter = adapter; clipToPadding = false; setPadding(0, dp(6), 0, dp(6))
+        }
+        chatList = list
+        shell.addView(list, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.BOTTOM
+            setBackgroundColor(th.surface); setPadding(dp(8), dp(8), dp(8), dp(8))
+        }
+        val input = EditText(this).apply {
+            hint = "Message"; setHintTextColor(th.textDim); setTextColor(th.text)
+            background = Ui.rounded(th.inputBg, dp(22)); setPadding(dp(16), dp(10), dp(16), dp(10))
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            maxLines = 5; setText(chatInputText)
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun afterTextChanged(s: android.text.Editable?) { chatInputText = s.toString() }
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            })
+        }
+        val send = TextView(this).apply {
+            text = "➤"; textSize = 20f; setTextColor(Color.WHITE); gravity = Gravity.CENTER; background = Ui.circle(th.primary)
+            setOnClickListener {
+                val t = chatInputText.trim()
+                if (t.isEmpty()) return@setOnClickListener
+                try {
+                    if (isGroup) Node.sendGroup(id, t) else Node.sendDirect(id, t)
+                    chatInputText = ""; input.setText("")
+                    refreshChat(forceBottom = true)
+                } catch (e: Exception) { toast("Could not send: ${e.message}") }
+            }
+        }
+        bar.addView(input, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        bar.addView(send, LinearLayout.LayoutParams(dp(46), dp(46)).apply { leftMargin = dp(8) })
+        shell.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        refreshChat(forceBottom = true)
+    }
+
+    private fun chatSubtitle(conv: String): String? {
+        val isGroup = conv.startsWith("g:")
+        val id = conv.substring(2)
+        val presence = presenceMap(conv)
+        return if (isGroup) {
+            val n = Node.read { it.group(id)?.session?.memberKeys()?.size ?: 0 }
+            val sharing = presence.count { !it.value.second }
+            "$n members" + if (sharing > 0) "  ·  $sharing sharing location" else ""
+        } else {
+            val pr = presence[id]
+            val verified = Node.read { it.contact(id)?.verified ?: true }
+            when {
+                pr != null -> presenceText(pr).replace("📍 ", "sharing location · ").replace("now", "just now")
+                !verified -> "not verified"
+                else -> null
+            }
+        }
+    }
+
+    private fun chatMenu(anchor: View, conv: String, isGroup: Boolean) {
+        PopupMenu(this, anchor).apply {
+            menu.add("Share my location…")
+            if (isGroup) { menu.add("Members"); menu.add("Invite a contact") }
+            setOnMenuItemClickListener { mi ->
+                when (mi.title.toString()) {
+                    "Share my location…" -> shareDialog(conv)
+                    "Members" -> membersDialog(conv.substring(2))
+                    else -> inviteDialog(conv.substring(2))
+                }
+                true
+            }
+        }.show()
+    }
+
+    private fun refreshChat(forceBottom: Boolean = false) {
+        val list = chatList ?: return
+        val adapter = chatAdapter ?: return
+        val atBottom = forceBottom || list.count == 0 || list.lastVisiblePosition >= list.count - 2
+        adapter.reload()
+        setSubtitle(chatSubtitle(chatConv))
+        val mine = Node.sharePrecisionFor(chatConv)
+        chatBanner?.apply {
+            visibility = if (mine == null) View.GONE else View.VISIBLE
+            text = "📍 You are sharing your location here (${mine?.label}). Tap to change."
+        }
+        if (atBottom) list.post { list.setSelection(adapter.count - 1) }
+    }
+
+    private inner class ChatAdapter(val conv: String, val isGroup: Boolean) : BaseAdapter() {
+        var items: List<ChatItem> = emptyList()
+        var names: Map<String, String> = emptyMap()
+        var presence: Map<String, kotlin.Pair<Long, Boolean>> = emptyMap()
+
+        fun reload() {
+            names = Node.read { e -> e.contactList().associate { it.id to it.name } }
+            presence = presenceMap(conv)
+            val out = ArrayList<ChatItem>()
+            val dayFmt = SimpleDateFormat("EEE, MMM d", Locale.getDefault())
+            var lastDay = ""
+            var prev: Msg? = null
+            for (m in Node.messages(conv)) {
+                val d = dayFmt.format(Date(m.ts))
+                if (d != lastDay) { out.add(ChatItem.Day(d)); lastDay = d; prev = null }
+                out.add(ChatItem.Message(m, !m.outgoing && (prev == null || prev.outgoing || prev.sender != m.sender)))
+                prev = m
+            }
+            items = out
+            notifyDataSetChanged()
+        }
+
+        override fun getCount() = items.size
+        override fun getItem(position: Int): Any = items[position]
+        override fun getItemId(position: Int) = position.toLong()
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View =
+            when (val it = items[position]) {
+                is ChatItem.Day -> dayView(it.text)
+                is ChatItem.Message -> messageView(conv, isGroup, it.m, it.header, names, presence)
+            }
+    }
+
+    private fun dayView(text: String): View {
+        val box = LinearLayout(this).apply { gravity = Gravity.CENTER; setPadding(0, dp(10), 0, dp(6)) }
+        box.addView(TextView(this).apply {
+            this.text = text; textSize = 12f; setTextColor(th.textDim)
+            background = Ui.rounded(th.tint(th.textDim, 0x22), dp(12)); setPadding(dp(12), dp(4), dp(12), dp(4))
+        })
+        return box
+    }
+
+    private fun messageView(
+        conv: String, isGroup: Boolean, m: Msg, header: Boolean,
+        names: Map<String, String>, presence: Map<String, kotlin.Pair<Long, Boolean>>,
+    ): View {
+        val mine = m.outgoing
+        val name = names[m.sender] ?: ("Member " + m.sender.take(4))
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = if (mine) Gravity.END else Gravity.START
+            setPadding(dp(8), dp(if (header) 8 else 2), dp(8), dp(2))
+        }
+        if (!mine && isGroup) {
+            val slot: View = if (header) avatar(name, m.sender, 34).also { it.setOnClickListener { openPerson(conv, m.sender) } } else View(this)
+            row.addView(slot, LinearLayout.LayoutParams(dp(34), dp(34)).apply { rightMargin = dp(6) })
+        }
+        val bubble = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = Ui.bubble(if (mine) th.bubbleMine else th.bubbleOther, mine, dp(16), dp(4))
+            setPadding(dp(12), dp(8), dp(12), dp(6))
+        }
+        if (!mine && header) {
+            val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+            if (isGroup) head.addView(TextView(this).apply {
+                text = name; textSize = 13f; setTypeface(typeface, Typeface.BOLD); setTextColor(th.colorForText(m.sender))
+                setOnClickListener { openPerson(conv, m.sender) }
+            })
+            val pr = presence[m.sender]
+            if (pr != null) {
+                val fresh = !pr.second && pr.first <= 15
+                head.addView(TextView(this).apply {
+                    text = presenceText(pr); textSize = 11f
+                    setTextColor(if (fresh) th.live else th.textDim)
+                    background = Ui.rounded(th.tint(if (fresh) th.live else th.textDim, 0x22), dp(10))
+                    setPadding(dp(8), dp(2), dp(8), dp(2)); setOnClickListener { openPerson(conv, m.sender) }
+                }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { if (isGroup) leftMargin = dp(8) })
+            }
+            if (head.childCount > 0) bubble.addView(head)
+        }
+        bubble.addView(TextView(this).apply {
+            text = m.text; textSize = 16f; setTextColor(if (mine) Color.WHITE else th.text)
+            maxWidth = (resources.displayMetrics.widthPixels * 0.72).toInt()
+        })
+        bubble.addView(TextView(this).apply {
+            text = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(m.ts)); textSize = 11f
+            setTextColor(if (mine) 0xB3FFFFFF.toInt() else th.textDim)
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { gravity = Gravity.END })
+        row.addView(bubble, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        return row
+    }
+
+    private fun Theme.colorForText(id: String): Int {
+        val c = colorFor(id)
+        return if (dark) Color.rgb((Color.red(c) + 255) / 2, (Color.green(c) + 255) / 2, (Color.blue(c) + 255) / 2) else c
+    }
+
+    private fun openPerson(conv: String, sender: String) = go(Screen.Map(conv, sender))
+
+    // ------------------------------------------------------------ map
+
+    private fun mapScreen(conv: String, focus: String?) {
+        mapConv = conv
+        val isGroup = conv.startsWith("g:")
+        val id = conv.substring(2)
+        val title = Node.read { e -> if (isGroup) e.group(id)?.name ?: "Group" else e.contact(id)?.name ?: "Contact" }
+        topBar(title, "Map", onBack = { go(Screen.Chat(conv)) })
+
+        val frame = FrameLayout(this)
+        val mv = MapView(this)
+        mapView = mv
+        mv.focus(focus)
+        frame.addView(mv, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        val ctl = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        fun round(t: String, f: () -> Unit) = TextView(this).apply {
+            text = t; textSize = 20f; setTextColor(th.text); gravity = Gravity.CENTER
+            background = Ui.circle(th.surface); elevation = dp(3).toFloat(); setOnClickListener { f() }
+        }
+        ctl.addView(round("+") { mv.zoomBy(1.0) }, LinearLayout.LayoutParams(dp(44), dp(44)).apply { bottomMargin = dp(8) })
+        ctl.addView(round("−") { mv.zoomBy(-1.0) }, LinearLayout.LayoutParams(dp(44), dp(44)).apply { bottomMargin = dp(8) })
+        ctl.addView(round("◎") { mv.fit() }, LinearLayout.LayoutParams(dp(44), dp(44)))
+        frame.addView(ctl, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.END or Gravity.BOTTOM).apply { setMargins(0, 0, dp(12), dp(12)) })
+        shell.addView(frame, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        val panel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(8), dp(12), dp(8)) }
+        val people = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        peopleBox = people
+        panel.addView(people)
+        panel.addView(CheckBox(this).apply {
+            text = "Show my own position on the map"; setTextColor(th.text)
+            isChecked = Node.mapShowMe()
+            setOnCheckedChangeListener { _, v -> Node.setMapShowMe(v); refreshMap() }
+        })
+        panel.addView(label(
+            "Hides your marker on YOUR screen only. People see you according to \"Share my location\" in the chat menu. " +
+                "Map pictures: © OpenStreetMap contributors, fetched through Tor.", 11f, dim = true,
         ))
-        col.addView(button("Add contact (pair in person)") { go(Screen.Pair) })
-        col.addView(button("New group") { newGroupDialog() })
-
-        val contacts = Node.read { it.contactList().map { c -> Triple(c.id, c.name, c.verified) } }
-        val groups = Node.read { it.groupList().map { g -> Triple(g.id, g.name, g.session.isActive) } }
-        col.addView(label("Chats", 16f, true))
-        if (contacts.isEmpty() && groups.isEmpty()) col.addView(label("Nothing yet. Add a contact to start.", 13f))
-        for ((id, name, verified) in contacts) {
-            col.addView(button(name + if (verified) "" else "  (not verified)") { go(Screen.Chat("c:$id")) })
-        }
-        for ((id, name, active) in groups) {
-            col.addView(button("Group: $name" + if (active) "" else "  (removed)") { go(Screen.Chat("g:$id")) })
-        }
-        col.addView(label("Settings", 16f, true))
-        col.addView(button("Allow running in background (battery)") {
-            try {
-                startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
-            } catch (e: Exception) { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
-        })
-        col.addView(button("Open app settings (autostart, battery)") {
-            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
-        })
-        col.addView(button("Save diagnostic log to a file") { startLogSave() })
-        col.addView(button("Stop connection") { startService(Intent(this, ChatService::class.java).setAction(ChatService.ACTION_STOP)) })
-        col.addView(button("Start connection") { startForegroundService(Intent(this, ChatService::class.java)) })
+        shell.addView(ScrollView(this).apply { addView(panel); setBackgroundColor(th.surface) },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(220)))
+        refreshMap()
     }
 
-    private fun pair(col: LinearLayout) {
-        col.addView(label("Pair in person", 20f, true))
+    private fun refreshMap() {
+        val mv = mapView ?: return
+        val box = peopleBox ?: return
+        val conv = mapConv
+        val now = System.currentTimeMillis()
+        val showMe = Node.mapShowMe()
+        val entries = Node.locationEntries(conv)
+        val data = Node.read { e ->
+            val names = e.contactList().associate { it.id to it.name }
+            val me = e.identityPublic.joinToString("") { "%02x".format(it) }
+            val ids = if (conv.startsWith("g:")) e.group(conv.substring(2))?.session?.memberKeys()?.map { k -> k.joinToString("") { "%02x".format(it) } } ?: emptyList()
+            else listOf(me, conv.substring(2))
+            Triple(names, me, ids)
+        }
+        val (names, me, ids) = data
+        val markers = ArrayList<MapView.Marker>()
+        box.removeAllViews()
+        // Me first, then the others in the order of the member list.
+        for (pid in (listOf(me) + ids.filter { it != me }).distinct()) {
+            val isMe = pid == me
+            val who = if (isMe) "Me" else names[pid] ?: ("Member " + pid.take(4))
+            val en = entries.firstOrNull { it.sender == pid }
+            val p = en?.latest
+            val age = if (p == null) 0L else ((now - p.timestamp) / 60_000L).coerceAtLeast(0)
+            val ageText = if (age < 1) "just now" else if (age < 60) "$age min ago" else "${age / 60} h ago"
+            val status = when {
+                en == null || (p == null && !en.paused) -> "Not sharing with you"
+                en.paused -> "Sharing paused"
+                else -> "±${p!!.accuracyM} m · $ageText" + if (age > 15) " (old)" else ""
+            }
+            val shown = p != null && en != null && !en.paused && !(isMe && !showMe)
+            if (shown) markers.add(MapView.Marker(pid, who, p!!.lat, p.lon, p.accuracyM, age, en!!.trail.map { doubleArrayOf(it.lat, it.lon) }, isMe))
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(6), 0, dp(6))
+                setOnClickListener {
+                    if (shown) mv.focus(pid) else toast(if (isMe) "You are not sharing here yet (chat menu, Share my location)" else "$who is not sharing their location with you")
+                }
+            }
+            row.addView(avatar(who, pid, 36), LinearLayout.LayoutParams(dp(36), dp(36)).apply { rightMargin = dp(12) })
+            val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            col.addView(TextView(this).apply { text = who; textSize = 15f; setTextColor(th.text); setTypeface(typeface, Typeface.BOLD) })
+            col.addView(TextView(this).apply {
+                text = status; textSize = 13f
+                setTextColor(if (shown && age <= 15) th.live else th.textDim)
+            })
+            row.addView(col)
+            box.addView(row)
+        }
+        mv.setMarkers(markers)
+    }
+
+    // ------------------------------------------------------------ pairing
+
+    private fun pairScreen() {
+        topBar("Add contact", "Pair in person", onBack = {
+            Node.cancelPairing(); Node.pendingPairing = null; confirmName = null; go(Screen.Home)
+        })
+        val col = scrollColumn()
         val done = Node.pendingPairing
         if (done != null) {
             col.addView(label("Safety code", 14f, true))
-            col.addView(label(done.safetyCode, 32f, true, mono = true))
+            col.addView(label(done.safetyCode, 34f, true, mono = true))
             col.addView(label(
                 "Read this code out to the other person and listen to theirs. BOTH phones must show exactly the same code. " +
                     "If they differ, someone else may have used your code: tap the red button.", 14f,
             ))
-            val nameBox = EditText(this).apply {
-                hint = "Name for this contact"; setText(confirmName ?: done.contact.name); isSingleLine = true
-                addTextChangedListener(object : android.text.TextWatcher {
-                    override fun afterTextChanged(s: android.text.Editable?) { confirmName = s.toString() }
-                    override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                    override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                })
-            }
+            val nameBox = styledEdit("Name for this contact", confirmName ?: done.contact.name) { confirmName = it }
             col.addView(nameBox)
-            col.addView(button("Codes match") {
+            col.addButton("Codes match") {
                 val n = (confirmName ?: done.contact.name).trim().ifEmpty { "Contact" }.take(40)
                 Node.use { it.renameContact(done.contact.id, n); it.confirmVerified(done.contact.id) }
                 Node.pendingPairing = null; confirmName = null; go(Screen.Home)
-            })
-            col.addView(button("Codes do NOT match: delete this contact") {
+            }
+            col.addView(button("Codes do NOT match: delete this contact", filled = false) {
                 Node.use { it.removeContact(done.contact.id) }
                 Node.pendingPairing = null; confirmName = null; go(Screen.Home)
-            })
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
             return
         }
         col.addView(label(
             "1. Show your code. The other person scans it (or pastes it, in the test build). You only need ONE scan: " +
                 "your phone then shows the safety code by itself.\n" +
                 "2. Read the safety code out loud on both phones and confirm they match.\n" +
-                "Do not photograph or share the code: it contains secrets. This screen blocks screenshots.", 13f,
+                "Do not photograph or share the code: it contains secrets. This screen blocks screenshots.", 13f, dim = true,
         ))
-        val name = EditText(this).apply {
-            hint = "Name for this contact"; setText(pairName); inputType = InputType.TYPE_CLASS_TEXT; isSingleLine = true
-        }
-        col.addView(name)
+        val name = styledEdit("Name for this contact", pairName) { pairName = it.trim().ifEmpty { "Contact" } }
+        col.addView(name, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
         val offer = Node.pairingOffer()
         if (offer == null) {
             col.addView(label("Waiting for the connection to be ready (can take a minute or two)…", 13f, true))
@@ -205,12 +700,17 @@ class MainActivity : Activity() {
             col.addView(ImageView(this).apply {
                 setImageBitmap(qr("thornberry1:" + Base64.encodeToString(offer, Base64.NO_WRAP or Base64.URL_SAFE or Base64.NO_PADDING)))
                 setBackgroundColor(Color.WHITE); adjustViewBounds = true
-            })
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(12) })
+            col.addButton("Scan their code") {
+                IntentIntegrator(this).setDesiredBarcodeFormats(IntentIntegrator.QR_CODE)
+                    .setPrompt("Scan their Thornberry code").setBeepEnabled(false)
+                    .setOrientationLocked(false).setBarcodeImageEnabled(false).initiateScan()
+            }
             if (BuildConfig.DEBUG) {
                 // TEST BUILDS ONLY: lets two copies on one phone pair without a camera. The clipboard is
                 // readable by other apps, so this does not exist in release builds.
-                col.addView(label("Test-only shortcut (not in release builds):", 12f, true))
-                col.addView(button("Copy my code as text") {
+                col.addView(label("Test-only shortcut (not in release builds):", 12f, true, dim = true))
+                col.addButton("Copy my code as text", filled = false) {
                     val txt = "thornberry1:" + Base64.encodeToString(offer, Base64.NO_WRAP or Base64.URL_SAFE or Base64.NO_PADDING)
                     val clip = android.content.ClipData.newPlainText("code", txt)
                     if (Build.VERSION.SDK_INT >= 33) {
@@ -220,98 +720,59 @@ class MainActivity : Activity() {
                     }
                     getSystemService(android.content.ClipboardManager::class.java).setPrimaryClip(clip)
                     toast("Copied (test only)")
-                })
-                col.addView(button("Paste their code") {
-                    pairName = name.text.toString().trim().ifEmpty { "Contact" }
+                }
+                col.addButton("Paste their code", filled = false) {
                     val txt = getSystemService(android.content.ClipboardManager::class.java)
                         .primaryClip?.getItemAt(0)?.text?.toString()?.trim().orEmpty()
                     handleScanned(txt)
                     render()
-                })
+                }
             }
-            col.addView(button("Scan their code") {
-                pairName = name.text.toString().trim().ifEmpty { "Contact" }
-                IntentIntegrator(this).setDesiredBarcodeFormats(IntentIntegrator.QR_CODE)
-                    .setPrompt("Scan their Thornberry code").setBeepEnabled(false)
-                    .setOrientationLocked(false).setBarcodeImageEnabled(false).initiateScan()
-            })
         }
     }
 
-    private fun chat(col: LinearLayout, conv: String) {
-        val isGroup = conv.startsWith("g:")
-        val id = conv.substring(2)
-        val title = Node.read { e ->
-            if (isGroup) e.group(id)?.name ?: "Group" else e.contact(id)?.name ?: "Contact"
-        }
-        col.addView(label(title, 20f, true))
-        if (isGroup) {
-            col.addView(button("Map") { go(Screen.Map(id)) })
-            col.addView(button("Where is everyone (list)") { whereDialog(id) })
-            col.addView(button("Share my location: " + (Node.sharePrecision(id)?.label ?: "Off")) { shareDialog(id) })
-            col.addView(button("Members") { membersDialog(id) })
-            col.addView(button("Invite a contact") { inviteDialog(id) })
-        }
-        chatLog = label("", 14f)
-        chatScroll = ScrollView(this).apply { addView(chatLog) }
-        col.addView(chatScroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(360)))
-        val input = EditText(this).apply {
-            hint = "Message"; setText(chatInputText); inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
-            addTextChangedListener(object : android.text.TextWatcher {
-                override fun afterTextChanged(s: android.text.Editable?) { chatInputText = s.toString() }
-                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-            })
-        }
-        col.addView(input)
-        col.addView(button("Send") {
-            val t = chatInputText.trim()
-            if (t.isEmpty()) return@button
-            try {
-                if (isGroup) Node.sendGroup(id, t) else Node.sendDirect(id, t)
-                chatInputText = ""; input.setText("")
-            } catch (e: Exception) { toast("Could not send: ${e.message}") }
+    private fun styledEdit(hintText: String, initial: String, onChange: (String) -> Unit) = EditText(this).apply {
+        hint = hintText; setText(initial); isSingleLine = true; inputType = InputType.TYPE_CLASS_TEXT
+        setHintTextColor(th.textDim); setTextColor(th.text)
+        background = Ui.rounded(th.inputBg, dp(14)); setPadding(dp(14), dp(12), dp(14), dp(12))
+        addTextChangedListener(object : android.text.TextWatcher {
+            override fun afterTextChanged(s: android.text.Editable?) { onChange(s.toString()) }
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
         })
-        updateChatLog()
     }
 
-    // ------------------------------------------------------------ map
+    // ------------------------------------------------------------ settings
 
-    private fun mapScreen(col: LinearLayout, groupId: String) {
-        val title = Node.read { e -> e.group(groupId)?.name ?: "Group" }
-        col.addView(label("$title: map", 20f, true))
-        val mv = MapView(this)
-        mapView = mv
-        mv.onMarkerTap = { m ->
-            val ago = if (m.ageMin < 1) "just now" else if (m.ageMin < 60) "${m.ageMin} min ago" else "${m.ageMin / 60} h ago"
-            toast("${m.name}: ±${m.accuracyM} m, $ago")
-        }
-        col.addView(mv, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(440)))
-        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        fun rowBtn(t: String, f: () -> Unit) = row.addView(
-            button(t, f), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f),
-        )
-        rowBtn("+") { mv.zoomBy(1.0) }
-        rowBtn("−") { mv.zoomBy(-1.0) }
-        rowBtn("Show all") { mv.fit() }
-        col.addView(row)
-        col.addView(android.widget.CheckBox(this).apply {
-            text = "Show my own position on the map"
-            isChecked = Node.mapShowMe()
-            setOnCheckedChangeListener { _, v -> Node.setMapShowMe(v); refreshMap() }
-        })
+    private fun settingsScreen() {
+        topBar("Settings", "Thornberry test build 0.5.0", onBack = { go(Screen.Home) })
+        val col = scrollColumn()
+        col.addView(label("Test data only. No server. Not independently reviewed.", 12f, dim = true))
         col.addView(label(
-            "This only hides your marker on YOUR screen. What you share with the group is set under \"Share my location\". " +
-                "Your own marker appears only while you are sharing with this group.", 11f,
+            "Tor: ${Node.torState}\nMy address: ${if (Node.onion.isEmpty()) "(not published yet)" else Node.onion.take(12) + "…"}\n" +
+                "Crypto self-test on this phone: ${Node.selfTest}", 12f, mono = true,
         ))
+        col.addView(label("Connection", 16f, true).apply { setPadding(0, dp(16), 0, 0) })
+        col.addButton("Allow running in background (battery)") {
+            try {
+                startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+            } catch (e: Exception) { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+        }
+        col.addButton("Open app settings (autostart, battery)", filled = false) {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+        }
+        col.addButton("Stop connection", filled = false) { startService(Intent(this, ChatService::class.java).setAction(ChatService.ACTION_STOP)) }
+        col.addButton("Start connection", filled = false) { startForegroundService(Intent(this, ChatService::class.java)) }
+
+        col.addView(label("Map", 16f, true).apply { setPadding(0, dp(16), 0, 0) })
         TileCache.init(applicationContext.filesDir)
-        val cacheLabel = label("", 12f)
+        val cacheLabel = label("", 12f, dim = true)
         fun updateCacheLabel() {
             val mb = TileCache.sizeBytes() / 1024.0 / 1024.0
             cacheLabel.text = "Saved map areas on this phone: %.1f MB (max %d MB)".format(Locale.US, mb, TileCache.MAX_BYTES / 1024 / 1024)
         }
-        col.addView(android.widget.CheckBox(this).apply {
-            text = "Save map areas I view (encrypted) so they load faster and work offline"
+        col.addView(CheckBox(this).apply {
+            text = "Save map areas I view (encrypted) so they load faster and work offline"; setTextColor(th.text)
             isChecked = Node.mapCacheEnabled()
             setOnCheckedChangeListener { _, v ->
                 Node.setMapCacheEnabled(v)
@@ -320,66 +781,14 @@ class MainActivity : Activity() {
         })
         col.addView(cacheLabel)
         updateCacheLabel()
-        col.addView(button("Clear saved map areas") { TileCache.clear(); updateCacheLabel(); toast("Cleared") })
+        col.addButton("Clear saved map areas", filled = false) { TileCache.clear(); updateCacheLabel(); toast("Cleared") }
         col.addView(label(
             "Only places you have already looked at are saved (no bulk download). Saved tiles are encrypted and cannot be " +
-                "listed by place, but they show how much you have viewed. Clearing destroys them.", 11f,
+                "listed by place, but they show how much you have viewed. Clearing destroys them.", 11f, dim = true,
         ))
-        val info = label("", 13f)
-        mapInfo = info
-        col.addView(info)
-        col.addView(label(
-            "Map pictures come from OpenStreetMap, fetched through Tor and kept in memory only. The map server can see " +
-                "which area you look at, not who you are or where anyone is. © OpenStreetMap contributors.", 11f,
-        ))
-        col.addView(button("Back to chat") { go(Screen.Chat("g:$groupId")) })
-        refreshMap()
-    }
 
-    private fun refreshMap() {
-        val s = screen as? Screen.Map ?: return
-        val mv = mapView ?: return
-        val now = System.currentTimeMillis()
-        val showMe = Node.mapShowMe()
-        val lines = ArrayList<String>()
-        val markers = Node.read { e ->
-            val names = e.contactList().associate { it.id to it.name }
-            val me = e.identityPublic.joinToString("") { "%02x".format(it) }
-            e.locations(s.groupId).mapNotNull { en ->
-                val isMe = en.sender == me
-                val who = if (isMe) "Me" else names[en.sender] ?: en.sender.take(6)
-                val p = en.latest
-                when {
-                    isMe && !showMe -> null
-                    en.paused -> { lines.add("$who: sharing paused"); null }
-                    p == null -> { lines.add("$who: no position yet"); null }
-                    else -> MapView.Marker(
-                        en.sender, who, p.lat, p.lon, p.accuracyM,
-                        ((now - p.timestamp) / 60_000L).coerceAtLeast(0),
-                        en.trail.map { doubleArrayOf(it.lat, it.lon) }, isMe,
-                    )
-                }
-            }
-        }
-        mv.setMarkers(markers)
-        for (m in markers) lines.add(
-            "${m.name}: ±${m.accuracyM} m, " + if (m.ageMin < 1) "just now" else if (m.ageMin < 60) "${m.ageMin} min ago" else "${m.ageMin / 60} h ago",
-        )
-        mapInfo?.text = if (lines.isEmpty()) "Nobody is sharing in this group yet." else lines.joinToString("\n")
-    }
-
-    private fun updateChatLog() {
-        val s = screen as? Screen.Chat ?: return
-        val log = chatLog ?: return
-        val fmt = SimpleDateFormat("MMM d HH:mm", Locale.US)
-        val names = Node.read { e -> e.contactList().associate { it.id to it.name } }
-        val sb = StringBuilder()
-        for (m in Node.messages(s.conv)) {
-            val who = if (m.outgoing) "Me" else names[m.sender] ?: m.sender.take(6)
-            sb.append(fmt.format(Date(m.ts))).append("  ").append(who).append(": ").append(m.text).append("\n\n")
-        }
-        log.text = sb.toString()
-        chatScroll?.post { chatScroll?.fullScroll(View.FOCUS_DOWN) }
+        col.addView(label("Diagnostics", 16f, true).apply { setPadding(0, dp(16), 0, 0) })
+        col.addButton("Save diagnostic log to a file", filled = false) { startLogSave() }
     }
 
     // ------------------------------------------------------------ dialogs
@@ -424,25 +833,26 @@ class MainActivity : Activity() {
         dlg.show()
     }
 
-    private var pendingShare: Pair<String, app.thornberry.crypto.Precision>? = null
+    private var pendingShare: kotlin.Pair<String, Precision>? = null
 
-    private fun shareDialog(groupId: String) {
-        val opts = listOf<app.thornberry.crypto.Precision?>(null) + app.thornberry.crypto.Precision.values().toList()
-        val names = opts.map { it?.label ?: "Off" }.toTypedArray()
+    private fun shareDialog(conv: String) {
+        val opts = listOf<Precision?>(null) + Precision.values().toList()
+        val who = if (conv.startsWith("g:")) "members of this group" else Node.read { it.contact(conv.substring(2))?.name ?: "this contact" }
         choiceDialog(
-            "Share my location with this group",
-            "Only members of this group can see it. Nothing goes to any server. Updates every few minutes, at least every 10. " +
-                "A notification stays visible while sharing.",
-            names.toList(),
+            "Share my location here",
+            "Only $who can see it. Nothing goes to any server. Updates every few minutes, at least every 10; while you travel " +
+                "your route is included. A notification stays visible while sharing.\n\nCurrently: " +
+                (Node.sharePrecisionFor(conv)?.label ?: "Off"),
+            opts.map { it?.label ?: "Off" },
         ) { i ->
             val p = opts[i]
             try {
                 if (p == null) {
-                    Node.setSharePrecision(groupId, null); render()
+                    Node.setSharePrecisionFor(conv, null); refresh()
                 } else if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
-                    enableShare(groupId, p)
+                    enableShare(conv, p)
                 } else {
-                    pendingShare = groupId to p
+                    pendingShare = conv to p
                     requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION), 7)
                 }
             } catch (e: Exception) {
@@ -451,10 +861,10 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun enableShare(groupId: String, p: app.thornberry.crypto.Precision) {
-        Node.setSharePrecision(groupId, p)
+    private fun enableShare(conv: String, p: Precision) {
+        Node.setSharePrecisionFor(conv, p)
         startForegroundService(Intent(this, ChatService::class.java).setAction(ChatService.ACTION_LOCATION_REFRESH))
-        render()
+        refresh()
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
@@ -462,46 +872,9 @@ class MainActivity : Activity() {
         if (requestCode != 7) return
         val pend = pendingShare; pendingShare = null
         if (pend != null && checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
-            enableShare(pend.first, pend.second)
+            try { enableShare(pend.first, pend.second) } catch (e: Exception) { ChatLog.err("enableShare", e); toast("Could not start sharing: ${e.message}") }
         } else {
             toast("Location permission is needed to share. Nothing is shared.")
-        }
-    }
-
-    private fun whereDialog(groupId: String) {
-        val now = System.currentTimeMillis()
-        data class Row(val label: String, val lat: Double?, val lon: Double?)
-        val rows = Node.read { e ->
-            val names = e.contactList().associate { it.id to it.name }
-            val me = e.identityPublic.joinToString("") { "%02x".format(it) }
-            e.locations(groupId).map { en ->
-                val who = if (en.sender == me) "Me" else names[en.sender] ?: en.sender.take(8)
-                val p = en.latest
-                val text = when {
-                    en.paused -> "$who: sharing paused"
-                    p == null -> "$who: no position yet"
-                    else -> {
-                        val mins = ((now - p.timestamp) / 60_000L).coerceAtLeast(0)
-                        val ago = if (mins < 1) "just now" else if (mins < 60) "$mins min ago" else "${mins / 60} h ago"
-                        val stale = if (mins > 15) " (old)" else ""
-                        "$who: %.5f, %.5f (±%d m), %s%s".format(Locale.US, p.lat, p.lon, p.accuracyM, ago, stale)
-                    }
-                }
-                Row(text, if (en.paused) null else p?.lat, if (en.paused) null else p?.lon)
-            }
-        }
-        if (rows.isEmpty()) { toast("Nobody is sharing in this group yet"); return }
-        choiceDialog(
-            "Where is everyone",
-            "Tap a line to open it in your map app (that app may contact its own servers).",
-            rows.map { it.label },
-        ) { i ->
-            val r = rows[i]
-            if (r.lat != null && r.lon != null) {
-                try {
-                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("geo:${r.lat},${r.lon}?q=${r.lat},${r.lon}")))
-                } catch (e: Exception) { toast("No map app found") }
-            }
         }
     }
 
@@ -528,7 +901,7 @@ class MainActivity : Activity() {
             }.show()
     }
 
-    // ------------------------------------------------------------ scanning
+    // ------------------------------------------------------------ scanning and files
 
     private fun startLogSave() {
         val stamp = SimpleDateFormat("yyyy-MM-dd-HHmm", Locale.US).format(Date())

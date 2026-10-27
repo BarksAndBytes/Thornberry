@@ -2,6 +2,7 @@ package app.thornberry.chat
 
 import android.content.Context
 import android.content.SharedPreferences
+import app.thornberry.crypto.LocationBoard
 import app.thornberry.crypto.Precision
 import android.os.Handler
 import android.os.Looper
@@ -105,7 +106,7 @@ object Node {
                         addMsg(Msg("g:" + ev.groupId, false, ev.sender.joinToString("") { "%02x".format(it) }, ev.text, ev.timestamp))
                         notifyHook?.invoke("New group message")
                     }
-                    is ChatEngine.Event.GroupJoined -> notifyHook?.invoke("You were added to a group")
+                    is ChatEngine.Event.GroupJoined -> if (!isDmName(ev.groupName)) notifyHook?.invoke("You were added to a group")
                     is ChatEngine.Event.RemovedFromGroup -> notifyHook?.invoke("You were removed from a group")
                     is ChatEngine.Event.GroupChanged -> {}
                     is ChatEngine.Event.LocationUpdate -> {}
@@ -217,6 +218,49 @@ object Node {
 
     fun sharingGroups(): List<Pair<String, Precision>> = read { e ->
         e.groupList().filter { it.session.isActive }.mapNotNull { g -> sharePrecision(g.id)?.let { g.id to it } }
+    }
+
+    // ---------------- location in direct chats ----------------
+    // Location sharing is per group. A direct chat shares through a hidden two-person group (its name starts with
+    // DM_PREFIX), created the first time you share with that person. Hidden groups never appear in the chat list.
+
+    const val DM_PREFIX = "\u200Bdm\u200B"
+    fun isDmName(n: String) = n.startsWith(DM_PREFIX)
+    private fun hexOf(b: ByteArray) = b.joinToString("") { "%02x".format(it) }
+
+    /** Active hidden groups shared with this contact (normally one; two if both of you created one at once). */
+    fun dmGroupIds(contactId: String): List<String> = read { e ->
+        e.groupList().filter { isDmName(it.name) && it.session.isActive && it.session.memberKeys().any { k -> hexOf(k) == contactId } }
+            .map { it.id }.sorted()
+    }
+
+    private fun ensureDmGroups(contactId: String): List<String> {
+        val have = dmGroupIds(contactId)
+        if (have.isNotEmpty()) return have
+        val now = System.currentTimeMillis()
+        val gid = use { it.createGroup(DM_PREFIX) }
+        use { it.inviteToGroup(gid, contactId, now) }
+        return listOf(gid)
+    }
+
+    /** The groups that carry location for a conversation ("g:<id>" is itself; "c:<id>" is the hidden group). */
+    fun shareGroupIds(conv: String, create: Boolean): List<String> {
+        val id = conv.substring(2)
+        return if (conv.startsWith("g:")) listOf(id) else if (create) ensureDmGroups(id) else dmGroupIds(id)
+    }
+
+    fun sharePrecisionFor(conv: String): Precision? = shareGroupIds(conv, false).firstNotNullOfOrNull { sharePrecision(it) }
+
+    fun setSharePrecisionFor(conv: String, p: Precision?) {
+        for (gid in shareGroupIds(conv, p != null)) setSharePrecision(gid, p)
+    }
+
+    /** One board entry per sender for a conversation (the newest if a direct chat has two hidden groups). */
+    fun locationEntries(conv: String): List<LocationBoard.Entry> {
+        val ids = shareGroupIds(conv, false)
+        return read { e -> ids.flatMap { e.locations(it) } }
+            .groupBy { it.sender }
+            .map { (_, l) -> l.maxByOrNull { maxOf(it.latest?.timestamp ?: 0L, it.pausedAt) }!! }
     }
 
     /** Whether our own marker is drawn on the map (display only: does not change what we share). */
