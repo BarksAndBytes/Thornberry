@@ -547,6 +547,9 @@ class MainActivity : Activity() {
         bubble.addView(TextView(this).apply {
             text = m.text; textSize = 16f; setTextColor(if (mine) Color.WHITE else th.text)
             maxWidth = (resources.displayMetrics.widthPixels * 0.72).toInt()
+            // A little slack on the right: on some phones/fonts a text view measured to its exact width clips the last letter.
+            setPadding(0, 0, dp(4), 0)
+            includeFontPadding = false
         })
         bubble.addView(TextView(this).apply {
             text = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(m.ts)); textSize = 11f
@@ -745,7 +748,7 @@ class MainActivity : Activity() {
     // ------------------------------------------------------------ settings
 
     private fun settingsScreen() {
-        topBar("Settings", "Thornberry test build 0.5.0", onBack = { go(Screen.Home) })
+        topBar("Settings", "Thornberry test build 0.5.1", onBack = { go(Screen.Home) })
         val col = scrollColumn()
         col.addView(label("Test data only. No server. Not independently reviewed.", 12f, dim = true))
         col.addView(label(
