@@ -182,6 +182,16 @@ class MapView(ctx: Context) : View(ctx) {
 
     fun zoomBy(delta: Double) { userMoved = true; zoom = (zoom + delta).coerceIn(MIN_ZOOM, MAX_ZOOM); invalidate() }
 
+    /** Move the view to a spot (used by the place picker). */
+    fun centerOn(lat: Double, lon: Double, z: Double) {
+        needFit = false; userMoved = true; pendingFocus = null
+        centerLat = lat.coerceIn(-85.0, 85.0); centerLon = lon; zoom = z.coerceIn(MIN_ZOOM, MAX_ZOOM)
+        invalidate()
+    }
+
+    /** The spot under the middle of the view. */
+    fun center(): kotlin.Pair<Double, Double> = centerLat to centerLon
+
     /** Show every marker. */
     fun fit() {
         userMoved = false

@@ -54,6 +54,8 @@ class MainActivity : Activity() {
         object Pair : Screen()
         object Settings : Screen()
         object Places : Screen()
+        /** Pick a spot for a new place. [conv] null = only on this phone. */
+        class PickPlace(val conv: String?) : Screen()
         class Chat(val conv: String) : Screen()
         class Map(val conv: String, val focus: String?) : Screen()
     }
@@ -138,6 +140,7 @@ class MainActivity : Activity() {
         when (val s = screen) {
             is Screen.Home -> super.onBackPressed()
             is Screen.Map -> go(Screen.Chat(s.conv))
+            is Screen.PickPlace -> go(Screen.Places)
             else -> {
                 if (s is Screen.Pair) Node.cancelPairing()
                 Node.pendingPairing = null; confirmName = null
@@ -167,6 +170,7 @@ class MainActivity : Activity() {
             is Screen.Pair -> pairScreen()
             is Screen.Settings -> settingsScreen()
             is Screen.Places -> placesScreen()
+            is Screen.PickPlace -> pickPlaceScreen(s.conv)
             is Screen.Chat -> chatScreen(s.conv)
             is Screen.Map -> mapScreen(s.conv, s.focus)
         }
@@ -786,12 +790,101 @@ class MainActivity : Activity() {
             }.setNegativeButton("Cancel", null).show()
     }
 
+    /** Who should see a new place: only this phone, a group, or one contact (their direct chat). */
+    private fun chooseNewPlaceScope() {
+        if (Node.placesUnreadable()) { toast("Saved places could not be read; nothing was changed"); return }
+        val opts = ArrayList<kotlin.Pair<String?, String>>()
+        opts.add(null to "Only me (kept on this phone)")
+        Node.read { e ->
+            e.groupList().filter { !Node.isDmName(it.name) && it.session.isActive }.forEach { opts.add("g:${it.id}" to "Group: ${it.name}") }
+            e.contactList().forEach { opts.add("c:${it.id}" to "Just me and ${it.name}") }
+        }
+        choiceDialog(
+            "Who should see this place?",
+            "Shared places can be seen and changed by everyone you share them with. Alerts are always your own choice.",
+            opts.map { it.second },
+        ) { i -> go(Screen.PickPlace(opts[i].first)) }
+    }
+
+    private fun pickPlaceScreen(conv: String?) {
+        val scope = when {
+            conv == null -> "Only on this phone"
+            conv.startsWith("g:") -> "Shared with " + (Node.read { it.group(conv.substring(2))?.name } ?: "group")
+            else -> "Shared with you and " + (Node.read { it.contact(conv.substring(2))?.name } ?: "contact")
+        }
+        topBar("Pick a spot", scope, onBack = { go(Screen.Places) })
+        val frame = FrameLayout(this)
+        val mv = MapView(this)
+        frame.addView(mv, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        // crosshair in the middle (does not take touches, so the map underneath still pans and zooms)
+        frame.addView(TextView(this).apply {
+            text = "⊕"; textSize = 40f; setTextColor(th.primary); gravity = Gravity.CENTER
+        }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
+        val ctl = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        fun round(t: String, f: () -> Unit) = TextView(this).apply {
+            text = t; textSize = 20f; setTextColor(th.text); gravity = Gravity.CENTER
+            background = Ui.circle(th.surface); elevation = dp(3).toFloat(); setOnClickListener { f() }
+        }
+        ctl.addView(round("+") { mv.zoomBy(1.0) }, LinearLayout.LayoutParams(dp(44), dp(44)).apply { bottomMargin = dp(8) })
+        ctl.addView(round("−") { mv.zoomBy(-1.0) }, LinearLayout.LayoutParams(dp(44), dp(44)))
+        frame.addView(ctl, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.END or Gravity.BOTTOM).apply { setMargins(0, 0, dp(12), dp(12)) })
+        shell.addView(frame, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        // what to show: places already in this scope, and people sharing in that chat (helps find the spot)
+        val places = if (conv == null) Node.places().filter { !Node.isShared(it.id) } else Node.placesForConv(conv)
+        mv.setPlaces(places.map { MapView.PlaceShape(it.id, it.name, it.lat, it.lon, it.radiusM) })
+        val now = System.currentTimeMillis()
+        val names = Node.read { e -> e.contactList().associate { it.id to it.name } }
+        val me = Node.read { e -> e.identityPublic.joinToString("") { "%02x".format(it) } }
+        val entries = if (conv != null) Node.locationEntries(conv) else Node.read { e -> e.groupList().flatMap { g -> e.locations(g.id) } }.filter { it.sender == me }
+        val markers = entries.mapNotNull { en ->
+            val p = en.latest ?: return@mapNotNull null
+            if (en.paused) return@mapNotNull null
+            MapView.Marker(en.sender, if (en.sender == me) "Me" else names[en.sender] ?: "Member", p.lat, p.lon, p.accuracyM,
+                ((now - p.timestamp) / 60_000L).coerceAtLeast(0), emptyList(), en.sender == me)
+        }.distinctBy { it.id }
+        mv.setMarkers(markers)
+        // start where this phone is, if Android already knows (no new request), else where the people are
+        val last = lastKnownFix()
+        if (last != null) mv.centerOn(last.first, last.second, 15.0) else if (markers.isEmpty()) mv.centerOn(39.0, -77.0, 4.0)
+
+        val bar = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(th.surface); setPadding(dp(16), dp(8), dp(16), dp(12)) }
+        bar.addView(label("Move the map so the ⊕ is on the spot, then tap the button. You can change the name, size and position afterwards.", 12f, dim = true))
+        bar.addButton("Place it here") {
+            val (lat, lon) = mv.center()
+            val input = EditText(this).apply { hint = "Name (Home, School…)"; isSingleLine = true }
+            AlertDialog.Builder(this).setTitle("Name this place").setView(input)
+                .setPositiveButton("Save") { _, _ ->
+                    val name = input.text.toString().trim().ifEmpty { "Place" }.take(40)
+                    try {
+                        if (conv == null) Node.addPersonalPlace(name, lat, lon, 200) else Node.addPlace(conv, name, lat, lon, 200)
+                        toast("Saved \"$name\" (200 m). Tap it to change the size or who to alert about.")
+                        go(Screen.Places)
+                    } catch (e: Exception) { toast("Could not save: ${e.message}") }
+                }.setNegativeButton("Cancel", null).show()
+        }
+        shell.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+    }
+
+    /** The phone's last known position from Android, only if location permission was already given. Nothing is requested. */
+    private fun lastKnownFix(): kotlin.Pair<Double, Double>? {
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED &&
+            checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED
+        ) return null
+        return try {
+            val lm = getSystemService(android.location.LocationManager::class.java)
+            lm.getProviders(true).mapNotNull { p -> try { lm.getLastKnownLocation(p) } catch (_: SecurityException) { null } }
+                .maxByOrNull { it.time }?.let { it.latitude to it.longitude }
+        } catch (_: Exception) { null }
+    }
+
     private fun placesScreen() {
         topBar("Places", "Alerts are worked out on this phone", onBack = { go(Screen.Home) })
         val col = scrollColumn()
+        col.addButton("Add a place") { chooseNewPlaceScope() }
         if (Node.placesUnreadable()) col.addView(label("Saved places could not be read, so they are off. Nothing was overwritten.", 14f, true))
         col.addView(label(
-            "Open a chat's map and press and hold on a spot to save a place. You are alerted when someone sharing their location " +
+            "Add a place here, or press and hold a spot on a chat's map. You are alerted when someone sharing their location " +
                 "with you arrives or leaves. Places you make in a chat are shared with everyone in that chat, who can also change them; " +
                 "who you are alerted about is your own choice and stays on this phone.", 13f, dim = true,
         ))
@@ -938,7 +1031,7 @@ class MainActivity : Activity() {
     // ------------------------------------------------------------ settings
 
     private fun settingsScreen() {
-        topBar("Settings", "Thornberry test build 0.8.0", onBack = { go(Screen.Home) })
+        topBar("Settings", "Thornberry test build 0.8.1", onBack = { go(Screen.Home) })
         val col = scrollColumn()
         col.addView(label("Test data only. No server. Not independently reviewed.", 12f, dim = true))
         col.addView(label(

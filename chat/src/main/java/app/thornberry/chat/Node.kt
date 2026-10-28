@@ -229,6 +229,16 @@ object Node {
         ChatLog.log("PLACE_ADDED", "radius=$radiusM shared=true")
     }
 
+    /** A place kept only on this phone (nobody else sees it). */
+    fun addPersonalPlace(name: String, lat: Double, lon: Double, radiusM: Int) {
+        synchronized(lock) {
+            check(!placesBlocked) { "saved places could not be read" }
+            placeBook.add(name, lat, lon, radiusM); savePlaces()
+        }
+        ChatLog.log("PLACE_ADDED", "radius=$radiusM shared=false")
+        changed()
+    }
+
     fun updatePlace(id: String, name: String, radiusM: Int, watch: Set<String>?) {
         check(!placesUnreadable()) { "saved places could not be read" }
         if (isShared(id)) {
