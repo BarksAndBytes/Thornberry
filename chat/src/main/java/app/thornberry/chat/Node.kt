@@ -187,6 +187,15 @@ object Node {
         changed()
     }
 
+    fun movePlace(id: String, lat: Double, lon: Double) {
+        synchronized(lock) {
+            check(!placesBlocked) { "saved places could not be read" }
+            placeBook.move(id, lat, lon); savePlaces()
+        }
+        ChatLog.log("PLACE_MOVED")
+        changed()
+    }
+
     fun removePlace(id: String) {
         synchronized(lock) {
             check(!placesBlocked) { "saved places could not be read" }

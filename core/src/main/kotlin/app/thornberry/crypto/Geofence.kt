@@ -110,6 +110,14 @@ class PlaceBook {
         if (radiusM != old.radiusM) states.keys.removeAll { it.startsWith("$id|") }
     }
 
+    /** Move a place. Who is inside is forgotten (the next confident position sets the state silently). */
+    fun move(id: String, lat: Double, lon: Double) {
+        val old = places[id] ?: throw CryptoException("unknown place")
+        validate(old.name, lat, lon, old.radiusM)
+        places[id] = Place(id, old.name, lat, lon, old.radiusM, old.watch)
+        states.keys.removeAll { it.startsWith("$id|") }
+    }
+
     fun remove(id: String) {
         places.remove(id)
         states.keys.removeAll { it.startsWith("$id|") }

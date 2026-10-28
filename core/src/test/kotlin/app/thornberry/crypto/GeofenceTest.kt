@@ -127,4 +127,18 @@ class GeofenceTest {
         val r = java.util.Random(11)
         repeat(2000) { try { PlaceBook.restore(ByteArray(r.nextInt(80)).also { x -> r.nextBytes(x) }) } catch (e: CryptoException) {} }
     }
+
+    @Test fun moving_a_place_validates_and_restarts_without_a_false_alert() {
+        val b = book()
+        val id = b.list().single().id
+        b.feed(bob, listOf(inside(now)), now) // bob is "home"
+        assertFailsWith<CryptoException> { b.move(id, 95.0, 0.0) }
+        assertFailsWith<CryptoException> { b.move("nope", 1.0, 1.0) }
+        b.move(id, home.first + 0.05, home.second) // place moves far away from bob
+        assertEquals(home.first + 0.05, b.list().single().lat, 1e-9)
+        assertEquals("Home", b.list().single().name)
+        // bob is now outside the moved place: the first confident position only sets the state
+        assertTrue(b.feed(bob, listOf(inside(now + 15 * sec), inside(now + 30 * sec)), now + 30 * sec).isEmpty())
+        assertTrue(b.events().isEmpty())
+    }
 }

@@ -58,9 +58,50 @@ class MapView(ctx: Context) : View(ctx) {
     /** Long press on the map: the latitude and longitude under the finger (used to save a place). */
     var onPlacePick: ((Double, Double) -> Unit)? = null
 
-    class PlaceShape(val name: String, val lat: Double, val lon: Double, val radiusM: Int)
+    /** Long press on a place's pin: open its properties. */
+    var onPlaceEdit: ((String) -> Unit)? = null
+    /** A place was dragged to a new spot (released). */
+    var onPlaceMoved: ((String, Double, Double) -> Unit)? = null
+
+    class PlaceShape(val id: String, val name: String, val lat: Double, val lon: Double, val radiusM: Int)
     private var shapes: List<PlaceShape> = emptyList()
-    fun setPlaces(list: List<PlaceShape>) { shapes = list; invalidate() }
+    // while dragging, and until the saved position comes back in setPlaces, draw the dragged place here
+    private var overrideId: String? = null
+    private var overrideLat = 0.0
+    private var overrideLon = 0.0
+    // live size preview while the properties slider moves
+    private var previewId: String? = null
+    private var previewR = 0
+
+    fun setPlaces(list: List<PlaceShape>) { shapes = list; if (dragId == null) overrideId = null; invalidate() }
+    fun setPreview(id: String?, radiusM: Int) { previewId = id; previewR = radiusM; invalidate() }
+
+    private var dragId: String? = null
+    private var dragMoved = false
+    private var dragDownX = 0f
+    private var dragDownY = 0f
+    private var grabDx = 0f
+    private var grabDy = 0f
+    private var pinLongPressed = false
+
+    private fun placePos(sh: PlaceShape) = if (sh.id == overrideId) overrideLat to overrideLon else sh.lat to sh.lon
+    private fun placeRadius(sh: PlaceShape) = if (sh.id == previewId) previewR else sh.radiusM
+
+    /** The place whose pin is under (x, y), if any (the nearest one). */
+    private fun hitPlace(x: Float, y: Float): PlaceShape? {
+        val cx = worldX(centerLon, zoom); val cy = worldY(centerLat, zoom)
+        var best: PlaceShape? = null; var bestD = Float.MAX_VALUE
+        for (sh in shapes) {
+            val (la, lo) = placePos(sh)
+            val dx = sx(lo, cx) - x; val dy = sy(la, cy) - y
+            val dist = kotlin.math.sqrt(dx * dx + dy * dy)
+            val mpp = 156543.03392 * cos(Math.toRadians(la)) / 2.0.pow(zoom)
+            val rPx = (placeRadius(sh) / mpp).toFloat()
+            val reach = max(32 * d, min(0.35f * rPx, 70 * d))
+            if (dist <= reach && dist < bestD) { best = sh; bestD = dist }
+        }
+        return best
+    }
 
     private var markers: List<Marker> = emptyList()
     private var centerLat = 20.0
@@ -94,7 +135,7 @@ class MapView(ctx: Context) : View(ctx) {
     private val gestures = GestureDetector(ctx, object : GestureDetector.SimpleOnGestureListener() {
         override fun onDown(e: MotionEvent) = true
         override fun onScroll(e1: MotionEvent?, e2: MotionEvent, dx: Float, dy: Float): Boolean {
-            if (scaleDetector.isInProgress) return true
+            if (scaleDetector.isInProgress || dragId != null) return true
             userMoved = true
             val cx = worldX(centerLon, zoom) + dx
             val cy = worldY(centerLat, zoom) + dy
@@ -103,6 +144,8 @@ class MapView(ctx: Context) : View(ctx) {
         }
         override fun onDoubleTap(e: MotionEvent): Boolean { zoomBy(1.0); return true }
         override fun onLongPress(e: MotionEvent) {
+            val hit = hitPlace(e.x, e.y)
+            if (hit != null) { pinLongPressed = true; onPlaceEdit?.invoke(hit.id); return }
             val x = worldX(centerLon, zoom) + (e.x - width / 2.0)
             val y = worldY(centerLat, zoom) + (e.y - height / 2.0)
             onPlacePick?.invoke(latOf(y, zoom), lonOf(x, zoom))
@@ -163,8 +206,40 @@ class MapView(ctx: Context) : View(ctx) {
     override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) { if (needFit && markers.isNotEmpty()) fit() }
 
     override fun onTouchEvent(e: MotionEvent): Boolean {
-        if (e.actionMasked == MotionEvent.ACTION_DOWN) parent?.requestDisallowInterceptTouchEvent(true)
-        scaleDetector.onTouchEvent(e)
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                parent?.requestDisallowInterceptTouchEvent(true)
+                pinLongPressed = false; dragMoved = false
+                val hit = hitPlace(e.x, e.y)
+                if (hit != null) {
+                    val cx = worldX(centerLon, zoom); val cy = worldY(centerLat, zoom)
+                    val (la, lo) = placePos(hit)
+                    dragId = hit.id; dragDownX = e.x; dragDownY = e.y
+                    grabDx = sx(lo, cx) - e.x; grabDy = sy(la, cy) - e.y
+                } else dragId = null
+            }
+            MotionEvent.ACTION_POINTER_DOWN -> { dragId = null; dragMoved = false } // a second finger: it is a zoom, not a drag
+            MotionEvent.ACTION_MOVE -> {
+                val id = dragId
+                if (id != null && !pinLongPressed && e.pointerCount == 1) {
+                    val dx = e.x - dragDownX; val dy = e.y - dragDownY
+                    if (!dragMoved && dx * dx + dy * dy > (10 * d) * (10 * d)) dragMoved = true
+                    if (dragMoved) {
+                        val wx = worldX(centerLon, zoom) + (e.x + grabDx - width / 2.0)
+                        val wy = worldY(centerLat, zoom) + (e.y + grabDy - height / 2.0)
+                        overrideId = id; overrideLat = latOf(wy, zoom).coerceIn(-85.0, 85.0); overrideLon = lonOf(wx, zoom)
+                        invalidate()
+                    }
+                }
+            }
+            MotionEvent.ACTION_UP -> {
+                val id = dragId
+                if (id != null && dragMoved && !pinLongPressed) onPlaceMoved?.invoke(id, overrideLat, overrideLon)
+                dragId = null; dragMoved = false
+            }
+            MotionEvent.ACTION_CANCEL -> { dragId = null; dragMoved = false; if (overrideId != null) { overrideId = null; invalidate() } }
+        }
+        if (dragId == null) scaleDetector.onTouchEvent(e)
         gestures.onTouchEvent(e)
         return true
     }
@@ -262,19 +337,26 @@ class MapView(ctx: Context) : View(ctx) {
     private fun drawPlaces(c: Canvas, cx: Double, cy: Double) {
         val green = Color.rgb(0x2E, 0x7D, 0x5B)
         for (sh in shapes) {
-            val mpp = 156543.03392 * cos(Math.toRadians(sh.lat)) / 2.0.pow(zoom)
-            val r = (sh.radiusM / mpp).toFloat()
-            val x = sx(sh.lon, cx); val y = sy(sh.lat, cy)
-            paint.style = Paint.Style.FILL; paint.color = green; paint.alpha = 45
+            val (la, lo) = placePos(sh)
+            val mpp = 156543.03392 * cos(Math.toRadians(la)) / 2.0.pow(zoom)
+            val r = (placeRadius(sh) / mpp).toFloat()
+            val x = sx(lo, cx); val y = sy(la, cy)
+            val active = sh.id == dragId && dragMoved
+            paint.style = Paint.Style.FILL; paint.color = green; paint.alpha = if (active) 70 else 45
             c.drawCircle(x, y, r, paint)
             paint.style = Paint.Style.STROKE; paint.strokeWidth = 2 * d; paint.alpha = 200
             c.drawCircle(x, y, r, paint)
             paint.alpha = 255
+            // the pin: press and hold to edit, press and drag to move
+            paint.style = Paint.Style.FILL; paint.color = Color.WHITE
+            c.drawCircle(x, y, 10 * d, paint)
+            paint.color = green
+            c.drawCircle(x, y, 7 * d, paint)
             textPaint.textAlign = Paint.Align.CENTER; textPaint.textSize = 12 * d
             textPaint.color = Color.WHITE; textPaint.style = Paint.Style.STROKE; textPaint.strokeWidth = 3 * d
-            c.drawText(sh.name, x, y + 4 * d, textPaint)
+            c.drawText(sh.name, x, y + 26 * d, textPaint)
             textPaint.style = Paint.Style.FILL; textPaint.color = green
-            c.drawText(sh.name, x, y + 4 * d, textPaint)
+            c.drawText(sh.name, x, y + 26 * d, textPaint)
         }
     }
 
