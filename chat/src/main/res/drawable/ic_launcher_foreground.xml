@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Thornberry app icon: a map pin whose head is a berry. Original artwork for this project. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#40000000" android:pathData="M47,83 a7,2.2 0 1,0 14,0 a7,2.2 0 1,0 -14,0 Z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M54,82 L39.5,61.2 A21,21 0 1,1 68.5,61.2 Z" />
+    <path android:fillColor="#8E1B52" android:pathData="M48.80,47.00 a5.2,5.2 0 1,0 10.4,0 a5.2,5.2 0 1,0 -10.4,0 Z M48.80,37.40 a5.2,5.2 0 1,0 10.4,0 a5.2,5.2 0 1,0 -10.4,0 Z M57.11,42.20 a5.2,5.2 0 1,0 10.4,0 a5.2,5.2 0 1,0 -10.4,0 Z M57.11,51.80 a5.2,5.2 0 1,0 10.4,0 a5.2,5.2 0 1,0 -10.4,0 Z M48.80,56.60 a5.2,5.2 0 1,0 10.4,0 a5.2,5.2 0 1,0 -10.4,0 Z M40.49,51.80 a5.2,5.2 0 1,0 10.4,0 a5.2,5.2 0 1,0 -10.4,0 Z M40.49,42.20 a5.2,5.2 0 1,0 10.4,0 a5.2,5.2 0 1,0 -10.4,0 Z" />
+    <path android:fillColor="#59FFFFFF" android:pathData="M50.80,45.20 a1.4,1.4 0 1,0 2.8,0 a1.4,1.4 0 1,0 -2.8,0 Z M50.80,35.60 a1.4,1.4 0 1,0 2.8,0 a1.4,1.4 0 1,0 -2.8,0 Z M59.11,40.40 a1.4,1.4 0 1,0 2.8,0 a1.4,1.4 0 1,0 -2.8,0 Z M59.11,50.00 a1.4,1.4 0 1,0 2.8,0 a1.4,1.4 0 1,0 -2.8,0 Z M50.80,54.80 a1.4,1.4 0 1,0 2.8,0 a1.4,1.4 0 1,0 -2.8,0 Z M42.49,50.00 a1.4,1.4 0 1,0 2.8,0 a1.4,1.4 0 1,0 -2.8,0 Z M42.49,40.40 a1.4,1.4 0 1,0 2.8,0 a1.4,1.4 0 1,0 -2.8,0 Z" />
+    <path android:fillColor="#2E7D5B" android:pathData="M54,36.5 C49.5,35.5 46,31.5 45.2,27.8 C49.8,28.2 53.2,31.5 54,36.5 Z M54,36.5 C58.5,35.5 62,31.5 62.8,27.8 C58.2,28.2 54.8,31.5 54,36.5 Z" />
+</vector>
