@@ -88,6 +88,7 @@ class MainActivity : Activity() {
     private var mapConv = ""
 
     private val refresh: () -> Unit = {
+        Updater.maybeCheckOnLaunch(this)
         if (Node.pendingPairing != null && screen !is Screen.Pair) render()
         else when (screen) {
             is Screen.Chat -> refreshChat()
@@ -125,10 +126,11 @@ class MainActivity : Activity() {
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         if (Node.ready()) startForegroundService(Intent(this, ChatService::class.java))
+        if (savedInstanceState == null) Updater.launchCheckPending = true
         render()
     }
 
-    override fun onResume() { super.onResume(); Node.listeners.add(refresh); render() }
+    override fun onResume() { super.onResume(); Node.listeners.add(refresh); Updater.maybeCheckOnLaunch(this); render() }
     override fun onPause() { Node.listeners.remove(refresh); super.onPause() }
 
     @Deprecated("Deprecated in Java")
@@ -268,6 +270,15 @@ class MainActivity : Activity() {
             else -> "Connecting… (${Node.torState.lowercase()})"
         }
         topBar("Thornberry", status, actions = listOf("📌" to { _: View -> go(Screen.Places) }, "⚙" to { _: View -> go(Screen.Settings) }))
+        val upd = Updater.available
+        if (upd != null || Updater.status.startsWith("Downloading") || Updater.status.startsWith("Update failed") || Updater.status.startsWith("Waiting")) {
+            shell.addView(TextView(this).apply {
+                text = if (Updater.busy || upd == null) Updater.status else "⬆ Update available: ${upd.versionName}. Tap to install."
+                textSize = 13f; setTextColor(th.link); setPadding(dp(16), dp(10), dp(16), dp(10))
+                setBackgroundColor(th.tint(th.primary, 0x1E))
+                setOnClickListener { startUpdate() }
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
         val frame = FrameLayout(this)
         shell.addView(frame, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
@@ -889,10 +900,32 @@ class MainActivity : Activity() {
         dlg.window?.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
     }
 
+    // ------------------------------------------------------------ updates
+
+    private fun startUpdate() {
+        val upd = Updater.available ?: return
+        if (Updater.busy) return
+        if (!packageManager.canRequestPackageInstalls()) {
+            AlertDialog.Builder(this).setTitle("Allow updates")
+                .setMessage("Android needs your permission for Thornberry to install its own updates. Turn on \"Allow from this source\", then come back and tap the update again.")
+                .setPositiveButton("Open settings") { _, _ ->
+                    try { startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName"))) } catch (e: Exception) { toast("Could not open settings") }
+                }.setNegativeButton("Cancel", null).show()
+            return
+        }
+        AlertDialog.Builder(this).setTitle("Install ${upd.versionName}?")
+            .setMessage(
+                "Downloads %.1f MB from GitHub through Tor, checks it matches the published checksum, is newer, and is signed by the same key, then Android asks you to confirm. ".format(Locale.US, upd.size / 1e6) +
+                    "Your chats and contacts are kept. Reopen Thornberry after it updates.\n\nTest build: this trusts the GitHub repository.",
+            )
+            .setPositiveButton("Download and install") { _, _ -> Updater.downloadAndInstall(this); refresh() }
+            .setNegativeButton("Later", null).show()
+    }
+
     // ------------------------------------------------------------ settings
 
     private fun settingsScreen() {
-        topBar("Settings", "Thornberry test build 0.6.1", onBack = { go(Screen.Home) })
+        topBar("Settings", "Thornberry test build 0.7.0", onBack = { go(Screen.Home) })
         val col = scrollColumn()
         col.addView(label("Test data only. No server. Not independently reviewed.", 12f, dim = true))
         col.addView(label(
@@ -933,6 +966,18 @@ class MainActivity : Activity() {
             "Only places you have already looked at are saved (no bulk download). Saved tiles are encrypted and cannot be " +
                 "listed by place, but they show how much you have viewed. Clearing destroys them.", 11f, dim = true,
         ))
+
+        col.addView(label("Updates", 16f, true).apply { setPadding(0, dp(16), 0, 0) })
+        col.addView(label("Installed: ${BuildConfig.VERSION_NAME}\n${Updater.status}", 12f, dim = true))
+        col.addView(CheckBox(this).apply {
+            text = "Check for updates when the app opens (through Tor)"; setTextColor(th.text)
+            isChecked = Updater.enabled(this@MainActivity)
+            setOnCheckedChangeListener { _, v -> Updater.setEnabled(this@MainActivity, v) }
+        })
+        col.addButton("Check now", filled = false) {
+            if (Node.torState != "CONNECTED") toast("Waiting for Tor to connect") else Updater.checkNow(this)
+        }
+        if (Updater.available != null) col.addButton("Install ${Updater.available?.versionName}") { startUpdate() }
 
         col.addView(label("Diagnostics", 16f, true).apply { setPadding(0, dp(16), 0, 0) })
         col.addButton("Save diagnostic log to a file", filled = false) { startLogSave() }

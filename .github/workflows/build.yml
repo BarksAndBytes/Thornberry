@@ -92,7 +92,15 @@ jobs:
         run: |
           gh release delete chat-latest --yes --cleanup-tag || true
           cp chat/build/outputs/apk/debug/chat-debug.apk thornberry-chat-debug.apk
-          gh release create chat-latest thornberry-chat-debug.apk \
+          # version.json is what the app checks on launch (small; the APK address is fixed in the app).
+          vc=$(grep -oE 'versionCode = [0-9]+' chat/build.gradle.kts | grep -oE '[0-9]+')
+          vn=$(grep -oE 'versionName = "[^"]+"' chat/build.gradle.kts | sed -E 's/.*"(.*)"/\1/')
+          sha=$(sha256sum thornberry-chat-debug.apk | cut -d' ' -f1)
+          size=$(stat -c %s thornberry-chat-debug.apk)
+          printf '{"versionCode":%s,"versionName":"%s","commit":"%s","apk":"thornberry-chat-debug.apk","size":%s,"sha256":"%s"}\n' \
+            "$vc" "$vn" "${{ github.sha }}" "$size" "$sha" > version.json
+          cat version.json
+          gh release create chat-latest thornberry-chat-debug.apk version.json \
             --prerelease \
             --title "Chat test build (not a release)" \
             --notes "Debug build for testing only. Test data only. Built from commit ${{ github.sha }}."
