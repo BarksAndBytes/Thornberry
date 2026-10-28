@@ -1022,7 +1022,7 @@ class MainActivity : Activity() {
         AlertDialog.Builder(this).setTitle("Install ${upd.versionName}?")
             .setMessage(
                 "Downloads %.1f MB from GitHub through Tor, checks it matches the published checksum, is newer, and is signed by the same key, then Android asks you to confirm. ".format(Locale.US, upd.size / 1e6) +
-                    "Your chats and contacts are kept. Reopen Thornberry after it updates.\n\nTest build: this trusts the GitHub repository.",
+                    "Your chats and contacts are kept. Reopen Thornberry after it updates.\n\nThis trusts the Thornberry GitHub repository and its build workflow.",
             )
             .setPositiveButton("Download and install") { _, _ -> Updater.downloadAndInstall(this); refresh() }
             .setNegativeButton("Later", null).show()
@@ -1031,7 +1031,7 @@ class MainActivity : Activity() {
     // ------------------------------------------------------------ settings
 
     private fun settingsScreen() {
-        topBar("Settings", "Thornberry test build 0.8.1", onBack = { go(Screen.Home) })
+        topBar("Settings", "Thornberry test build 0.9.0", onBack = { go(Screen.Home) })
         val col = scrollColumn()
         col.addView(label("Test data only. No server. Not independently reviewed.", 12f, dim = true))
         col.addView(label(

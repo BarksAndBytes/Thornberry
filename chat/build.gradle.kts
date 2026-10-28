@@ -38,21 +38,31 @@ android {
         applicationId = "app.thornberry.chat"
         minSdk = 30
         targetSdk = 35
-        versionCode = 18
-        versionName = "0.8.1-test"
+        versionCode = 19
+        versionName = "0.9.0-test"
         ndk { abiFilters += listOf("arm64-v8a") }
     }
 
     sourceSets["main"].jniLibs.srcDir(torJniDir)
 
-    // TEST BUILDS ONLY: the same fixed PUBLIC key as the spike, so updates install over each other.
-    // It has no security value. Real releases will use a private key that is never committed.
+    // Signing. CI builds of the chat app use a PRIVATE key: the keystore is committed only in encrypted form
+    // (signing/chat-release.p12.enc) and the workflow decrypts it with the CHAT_SIGNING_PASSPHRASE secret,
+    // passing its path and password in CHAT_KEYSTORE / CHAT_KEYSTORE_PASSWORD. Builds without the secret
+    // (pull requests, local builds) fall back to the PUBLIC test key and cannot update an installed copy.
     signingConfigs {
         create("testKey") {
             storeFile = file("../app/spike-test.keystore")
             storePassword = "android"
             keyAlias = "spiketest"
             keyPassword = "android"
+        }
+        val ks = System.getenv("CHAT_KEYSTORE")
+        if (!ks.isNullOrEmpty()) create("privateKey") {
+            storeFile = file(ks)
+            storePassword = System.getenv("CHAT_KEYSTORE_PASSWORD")
+            keyAlias = "thornberry"
+            keyPassword = System.getenv("CHAT_KEYSTORE_PASSWORD")
+            storeType = "PKCS12"
         }
     }
 
@@ -68,7 +78,7 @@ android {
     }
 
     buildTypes {
-        debug { signingConfig = signingConfigs.getByName("testKey") }
+        debug { signingConfig = signingConfigs.findByName("privateKey") ?: signingConfigs.getByName("testKey") }
         release { isMinifyEnabled = false }
     }
 

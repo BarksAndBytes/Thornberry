@@ -21,8 +21,8 @@ import java.security.MessageDigest
  * - Only a small version file is fetched on launch. The APK is downloaded only after the owner taps "install".
  * - The download must match the size and SHA-256 in the version file, be this app's package, be NEWER than the
  *   installed build, and be signed by the same key. Android then asks the owner to confirm the install.
- * - Trust: this trusts the GitHub repository and its build workflow. Test builds use a PUBLIC signing key, so the
- *   signature check does not prove who built it. Real releases need a private key and signed release files.
+ * - Trust: this trusts the GitHub repository and its build workflow. Since 0.9.0 CI builds are signed with a private
+ *   key (decrypted in the workflow from a repository secret), so only that workflow can produce an installable update.
  */
 object Updater {
     private const val BASE = "https://github.com/BarksAndBytes/Thornberry/releases/download/chat-latest/"
@@ -135,7 +135,7 @@ object Updater {
         val mine = pm.getPackageInfo(ctx.packageName, flags).signingInfo?.apkContentsSigners?.map { it.toCharsString() }?.toSet()
         val theirs = arch.signingInfo?.apkContentsSigners?.map { it.toCharsString() }?.toSet()
         // Android refuses an update signed by another key anyway; this check just fails earlier and more clearly.
-        if (mine != null && theirs != null && mine != theirs) throw IllegalStateException("signed by a different key")
+        if (mine != null && theirs != null && mine != theirs) throw IllegalStateException("signed by a different key: this one update has to be installed by hand (uninstall, then install from the release page)")
     }
 
     private fun install(ctx: Context, f: File) {
