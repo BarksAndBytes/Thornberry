@@ -30,6 +30,8 @@ class GeoEvent(val placeId: String, val placeName: String, val person: String, v
 class PlaceBook {
     companion object {
         const val MAX_PLACES = 50
+        /** Including places shared with groups. */
+        const val MAX_TOTAL = 1000
         const val MAX_EVENTS = 100
         const val MIN_RADIUS_M = 50
         const val MAX_RADIUS_M = 5000
@@ -43,7 +45,7 @@ class PlaceBook {
             try {
                 val i = DataInputStream(ByteArrayInputStream(data))
                 if (i.readUnsignedByte() != VERSION) throw CryptoException("bad places version")
-                repeat(i.readInt().also { if (it !in 0..MAX_PLACES) throw CryptoException("bad places") }) {
+                repeat(i.readInt().also { if (it !in 0..MAX_TOTAL) throw CryptoException("bad places") }) {
                     val id = i.readUTF(); val name = i.readUTF()
                     val lat = i.readDouble(); val lon = i.readDouble(); val r = i.readInt()
                     val watch = if (i.readBoolean()) {
@@ -93,7 +95,7 @@ class PlaceBook {
     }
 
     fun add(name: String, lat: Double, lon: Double, radiusM: Int, watch: Set<String>? = null): Place {
-        if (places.size >= MAX_PLACES) throw CryptoException("too many places")
+        if (places.size >= MAX_TOTAL || places.keys.count { !it.startsWith("s:") } >= MAX_PLACES) throw CryptoException("too many places")
         val n = name.trim()
         validate(n, lat, lon, radiusM)
         val p = Place(Crypto.randomBytes(8).joinToString("") { "%02x".format(it) }, n, lat, lon, radiusM, watch)
@@ -116,6 +118,25 @@ class PlaceBook {
         validate(old.name, lat, lon, old.radiusM)
         places[id] = Place(id, old.name, lat, lon, old.radiusM, old.watch)
         states.keys.removeAll { it.startsWith("$id|") }
+    }
+
+    /**
+     * Create or refresh a place that is managed elsewhere (a place shared with a group), keeping our own
+     * watch list for it. A change of position or size forgets who is inside.
+     */
+    fun upsertExternal(id: String, name: String, lat: Double, lon: Double, radiusM: Int) {
+        val n = name.trim().take(MAX_NAME).ifBlank { "Place" }
+        validate(n, lat, lon, radiusM)
+        val old = places[id]
+        if (old == null && places.size >= MAX_TOTAL) throw CryptoException("too many places")
+        places[id] = Place(id, n, lat, lon, radiusM, old?.watch)
+        if (old != null && (old.lat != lat || old.lon != lon || old.radiusM != radiusM)) states.keys.removeAll { it.startsWith("$id|") }
+    }
+
+    /** Change only who we are alerted about. */
+    fun setWatch(id: String, watch: Set<String>?) {
+        val old = places[id] ?: throw CryptoException("unknown place")
+        places[id] = Place(id, old.name, old.lat, old.lon, old.radiusM, watch)
     }
 
     fun remove(id: String) {

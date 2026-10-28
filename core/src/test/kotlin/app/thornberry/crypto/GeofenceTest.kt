@@ -141,4 +141,17 @@ class GeofenceTest {
         assertTrue(b.feed(bob, listOf(inside(now + 15 * sec), inside(now + 30 * sec)), now + 30 * sec).isEmpty())
         assertTrue(b.events().isEmpty())
     }
+
+    @Test fun external_places_keep_our_watch_list_and_reset_state_when_moved() {
+        val b = PlaceBook()
+        b.upsertExternal("s:g:1", "Home", home.first, home.second, 200)
+        b.setWatch("s:g:1", setOf(bob))
+        b.feed(bob, listOf(inside(now)), now)
+        b.upsertExternal("s:g:1", "Home!", home.first, home.second, 200) // rename only: state kept
+        assertEquals(setOf(bob), b.list().single().watch); assertEquals("Home!", b.list().single().name)
+        assertEquals(1, b.feed(bob, listOf(outside(now + 15 * sec), outside(now + 30 * sec)), now + 30 * sec).size)
+        b.upsertExternal("s:g:1", "Home!", home.first + 0.05, home.second, 200) // moved: state forgotten
+        assertTrue(b.feed(bob, listOf(outside(now + 45 * sec), outside(now + 60 * sec)), now + 60 * sec).isEmpty())
+        assertEquals(setOf(bob), PlaceBook.restore(b.serialize()).list().single().watch)
+    }
 }

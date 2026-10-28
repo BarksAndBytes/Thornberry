@@ -679,7 +679,7 @@ class MainActivity : Activity() {
             row.addView(col)
             box.addView(row)
         }
-        mv.setPlaces(Node.places().map { MapView.PlaceShape(it.id, it.name, it.lat, it.lon, it.radiusM) })
+        mv.setPlaces(Node.placesForConv(conv).map { MapView.PlaceShape(it.id, it.name, it.lat, it.lon, it.radiusM) })
         mv.setMarkers(markers)
     }
 
@@ -774,12 +774,12 @@ class MainActivity : Activity() {
         if (Node.placesUnreadable()) { toast("Saved places could not be read; nothing was changed"); return }
         val input = EditText(this).apply { hint = "Name (Home, School…)"; isSingleLine = true }
         AlertDialog.Builder(this).setTitle("Save this spot as a place")
-            .setMessage("You get an alert when people arrive or leave. Places stay on this phone only; nobody else is told.")
+            .setMessage("Everyone in this chat will see this place and can change it. Each phone works out its own alerts when people arrive or leave.")
             .setView(input)
             .setPositiveButton("Save") { _, _ ->
                 val name = input.text.toString().trim().ifEmpty { "Place" }.take(40)
                 try {
-                    Node.addPlace(name, lat, lon, 200)
+                    Node.addPlace(mapConv, name, lat, lon, 200)
                     toast("Saved \"$name\" (200 m). Tap its pin to change the size or who to alert about.")
                     refresh()
                 } catch (e: Exception) { toast("Could not save: ${e.message}") }
@@ -792,7 +792,8 @@ class MainActivity : Activity() {
         if (Node.placesUnreadable()) col.addView(label("Saved places could not be read, so they are off. Nothing was overwritten.", 14f, true))
         col.addView(label(
             "Open a chat's map and press and hold on a spot to save a place. You are alerted when someone sharing their location " +
-                "with you arrives or leaves. Places are never sent to anyone.", 13f, dim = true,
+                "with you arrives or leaves. Places you make in a chat are shared with everyone in that chat, who can also change them; " +
+                "who you are alerted about is your own choice and stays on this phone.", 13f, dim = true,
         ))
         col.addView(label(
             "People who share at \"About 1 km\" or \"City level\" cannot trigger alerts, because the app cannot tell whether they are " +
@@ -809,7 +810,7 @@ class MainActivity : Activity() {
             }
             row.addView(label(pl.name, 16f, true))
             val who = pl.watch?.let { w -> if (w.isEmpty()) "nobody" else w.joinToString { names[it] ?: "a contact" } } ?: "everyone sharing with you"
-            row.addView(label("${pl.radiusM} m radius · alerts for $who", 13f, dim = true))
+            row.addView(label("${Node.placeScope(pl.id)} · ${pl.radiusM} m radius · alerts for $who", 13f, dim = true))
             col.addView(row)
             col.addView(View(this).apply { setBackgroundColor(th.divider) }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1))
         }
@@ -880,11 +881,23 @@ class MainActivity : Activity() {
         col.addView(TextView(this).apply {
             text = "To move it, press and drag its pin on the map."; textSize = 12f; setPadding(0, dp(10), 0, 0)
         })
+        col.addView(TextView(this).apply {
+            text = Node.placeScope(pl.id) + if (Node.isShared(pl.id)) ". Changes to the name, size, position or deleting it apply for everyone. Who you are alerted about is only your choice." else "."
+            textSize = 12f; setPadding(0, dp(6), 0, 0)
+        })
+        var shareRequested = false
+        if (!Node.isShared(pl.id) && mv != null && screen is Screen.Map) {
+            col.addView(Button(this).apply {
+                isAllCaps = false; text = "Share with this chat"
+                setOnClickListener { shareRequested = true; text = "Will be shared with this chat when you save" }
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
+        }
         val dlg = AlertDialog.Builder(this).setTitle("Place")
             .setView(ScrollView(this).apply { addView(col) })
             .setPositiveButton("Save") { _, _ ->
                 try {
                     Node.updatePlace(pl.id, nameBox.text.toString().trim().ifEmpty { pl.name }.take(40), radius, watch)
+                    if (shareRequested) { Node.sharePersonalPlace(pl.id, mapConv); toast("Shared with this chat") }
                     refresh()
                 } catch (e: Exception) { toast("Could not save: ${e.message}") }
             }
@@ -925,7 +938,7 @@ class MainActivity : Activity() {
     // ------------------------------------------------------------ settings
 
     private fun settingsScreen() {
-        topBar("Settings", "Thornberry test build 0.7.1", onBack = { go(Screen.Home) })
+        topBar("Settings", "Thornberry test build 0.8.0", onBack = { go(Screen.Home) })
         val col = scrollColumn()
         col.addView(label("Test data only. No server. Not independently reviewed.", 12f, dim = true))
         col.addView(label(

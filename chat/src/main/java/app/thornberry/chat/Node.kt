@@ -78,6 +78,7 @@ object Node {
                     placesBlocked = true
                     ChatLog.err("places-load", e)
                 }
+                engine?.let { if (!placesBlocked) { reconcileShared(it); savePlaces() } }
             } catch (e: Exception) {
                 // Never overwrite unreadable state with an empty one: the owner may be able to recover it.
                 engine = null
@@ -112,6 +113,7 @@ object Node {
             val e = engine ?: throw IllegalStateException(loadError ?: "not ready")
             result = block(e)
             val geoSenders = HashSet<String>()
+            var placesChanged = false
             val meHex = e.identityPublic.joinToString("") { "%02x".format(it) }
             for (ev in e.drainEvents()) {
                 when (ev) {
@@ -127,6 +129,7 @@ object Node {
                     is ChatEngine.Event.GroupChanged -> {}
                     is ChatEngine.Event.LocationUpdate -> if (ev.sender != meHex) geoSenders.add(ev.sender)
                     is ChatEngine.Event.SharingState -> {}
+                    is ChatEngine.Event.PlacesChanged -> placesChanged = true
                     is ChatEngine.Event.Paired -> {
                         ChatLog.log("PAIRED_BY_RESPONSE")
                         e.contact(ev.contactId)?.let { pendingPairing = ChatEngine.PairingResult(it, ev.safetyCode) }
@@ -134,6 +137,9 @@ object Node {
                         notifyHook?.invoke("Someone paired with you: compare the safety code")
                     }
                 }
+            }
+            if (placesChanged && !placesBlocked) {
+                try { reconcileShared(e); savePlaces() } catch (ex: Exception) { ChatLog.err("places-sync", ex) }
             }
             if (geoSenders.isNotEmpty() && placeBook.hasPlaces()) runGeofence(e, geoSenders)
             trigger = e.pendingFrames().isNotEmpty()
@@ -166,39 +172,103 @@ object Node {
 
     private fun savePlaces() { if (!placesBlocked) SecureStorage.write(dir, PLACES_FILE, placeBook.serialize()) }
 
+    // ---------------- places: shared with a chat, or only on this phone ----------------
+    // A shared place lives in the chat's group (the engine syncs it); the geofence book holds a copy under the id
+    // "s:<groupId>:<placeId>" plus our own choice of who to be alerted about. Older places made before sharing
+    // existed stay "only on this phone" until someone shares them.
+
+    private const val SHARED = "s:"
+
+    private fun reconcileShared(e: ChatEngine) {
+        val keep = HashSet<String>()
+        for (g in e.groupList()) {
+            if (!g.session.isActive) continue
+            for (p in e.sharedPlaces(g.id)) {
+                val id = "$SHARED${g.id}:${p.id}"
+                try { placeBook.upsertExternal(id, p.name, p.lat, p.lon, p.radiusM); keep.add(id) } catch (ex: Exception) { ChatLog.err("place-copy", ex) }
+            }
+        }
+        for (pl in placeBook.list()) if (pl.id.startsWith(SHARED) && pl.id !in keep) placeBook.remove(pl.id)
+    }
+
+    fun isShared(placeId: String) = placeId.startsWith(SHARED)
+    private fun splitShared(placeId: String): kotlin.Pair<String, String> {
+        val rest = placeId.removePrefix(SHARED)
+        return rest.substringBefore(':') to rest.substringAfter(':')
+    }
+
+    /** "Shared with Family", "Shared with you and Alex", or "Only on this phone". */
+    fun placeScope(placeId: String): String {
+        if (!isShared(placeId)) return "Only on this phone"
+        val gid = splitShared(placeId).first
+        return read { e ->
+            val g = e.group(gid) ?: return@read "Shared"
+            if (isDmName(g.name)) {
+                val me = hexOf(e.identityPublic)
+                val other = g.session.memberKeys().map { hexOf(it) }.firstOrNull { it != me }
+                "Shared with you and " + (other?.let { e.contact(it)?.name } ?: "your contact")
+            } else "Shared with ${g.name}"
+        }
+    }
+
     fun placesUnreadable(): Boolean = synchronized(lock) { placesBlocked }
     fun places(): List<Place> = synchronized(lock) { placeBook.list() }
     fun placeEvents(): List<GeoEvent> = synchronized(lock) { placeBook.events() }
 
-    fun addPlace(name: String, lat: Double, lon: Double, radiusM: Int, watch: Set<String>? = null): Place {
-        val p = synchronized(lock) {
-            check(!placesBlocked) { "saved places could not be read" }
-            placeBook.add(name, lat, lon, radiusM, watch).also { savePlaces() }
-        }
-        ChatLog.log("PLACE_ADDED", "radius=$radiusM")
-        changed(); return p
+    /** Places to draw on a chat's map: those shared in that chat, plus the ones only on this phone. */
+    fun placesForConv(conv: String): List<Place> {
+        val gids = shareGroupIds(conv, false).toSet()
+        return places().filter { !isShared(it.id) || splitShared(it.id).first in gids }
+    }
+
+    /** New places are shared with the chat they were made in (a direct chat uses its hidden two-person group). */
+    fun addPlace(conv: String, name: String, lat: Double, lon: Double, radiusM: Int) {
+        check(!placesUnreadable()) { "saved places could not be read" }
+        val gid = shareGroupIds(conv, true).first()
+        use { it.saveSharedPlace(gid, null, name, lat, lon, radiusM, System.currentTimeMillis()) }
+        ChatLog.log("PLACE_ADDED", "radius=$radiusM shared=true")
     }
 
     fun updatePlace(id: String, name: String, radiusM: Int, watch: Set<String>?) {
-        synchronized(lock) {
-            check(!placesBlocked) { "saved places could not be read" }
-            placeBook.update(id, name, radiusM, watch); savePlaces()
-        }
+        check(!placesUnreadable()) { "saved places could not be read" }
+        if (isShared(id)) {
+            val (gid, pid) = splitShared(id)
+            val cur = synchronized(lock) { placeBook.get(id) } ?: throw IllegalStateException("unknown place")
+            if (cur.name != name || cur.radiusM != radiusM) use { it.saveSharedPlace(gid, pid, name, cur.lat, cur.lon, radiusM, System.currentTimeMillis()) }
+            synchronized(lock) { placeBook.setWatch(id, watch); savePlaces() }
+        } else synchronized(lock) { placeBook.update(id, name, radiusM, watch); savePlaces() }
         changed()
     }
 
     fun movePlace(id: String, lat: Double, lon: Double) {
-        synchronized(lock) {
-            check(!placesBlocked) { "saved places could not be read" }
-            placeBook.move(id, lat, lon); savePlaces()
-        }
-        ChatLog.log("PLACE_MOVED")
+        check(!placesUnreadable()) { "saved places could not be read" }
+        if (isShared(id)) {
+            val (gid, pid) = splitShared(id)
+            val cur = synchronized(lock) { placeBook.get(id) } ?: throw IllegalStateException("unknown place")
+            use { it.saveSharedPlace(gid, pid, cur.name, lat, lon, cur.radiusM, System.currentTimeMillis()) }
+        } else synchronized(lock) { placeBook.move(id, lat, lon); savePlaces() }
+        ChatLog.log("PLACE_MOVED", "shared=${isShared(id)}")
         changed()
     }
 
     fun removePlace(id: String) {
+        check(!placesUnreadable()) { "saved places could not be read" }
+        if (isShared(id)) {
+            val (gid, pid) = splitShared(id)
+            use { it.deleteSharedPlace(gid, pid, System.currentTimeMillis()) }
+        } else synchronized(lock) { placeBook.remove(id); savePlaces() }
+        changed()
+    }
+
+    /** Turn a place that is only on this phone into one shared with a chat (keeps our alert choice). */
+    fun sharePersonalPlace(id: String, conv: String) {
+        check(!placesUnreadable()) { "saved places could not be read" }
+        val cur = synchronized(lock) { placeBook.get(id) } ?: throw IllegalStateException("unknown place")
+        val gid = shareGroupIds(conv, true).first()
+        val pid = use { it.saveSharedPlace(gid, null, cur.name, cur.lat, cur.lon, cur.radiusM, System.currentTimeMillis()) }
         synchronized(lock) {
-            check(!placesBlocked) { "saved places could not be read" }
+            val newId = "$SHARED$gid:$pid"
+            if (placeBook.get(newId) != null) placeBook.setWatch(newId, cur.watch)
             placeBook.remove(id); savePlaces()
         }
         changed()

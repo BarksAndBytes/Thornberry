@@ -57,6 +57,8 @@ class ChatEngine private constructor(
         class LocationUpdate(val groupId: String, val sender: String, val point: LocationPoint) : Event()
         /** A member paused or resumed sharing. */
         class SharingState(val groupId: String, val sender: String, val paused: Boolean) : Event()
+        /** The group's shared places changed (someone added, edited or deleted one). */
+        class PlacesChanged(val groupId: String) : Event()
     }
 
     /** A frame to deliver to a contact's onion address. Keep until delivery succeeds. */
@@ -72,6 +74,8 @@ class ChatEngine private constructor(
     private val pending = ArrayList<Outgoing>()
     private val events = ArrayList<Event>()
     private val board = LocationBoard()
+    private val groupPlaces = HashMap<String, SharedPlaces>()
+    private val placesSentAt = HashMap<String, Long>()
     private var activePairing: Pairing.Local? = null
     var droppedFrames = 0L
         private set
@@ -162,6 +166,7 @@ class ChatEngine private constructor(
         val update = g.session.addMember(identity, c.peerIdentity, now, rotateKey = true)
         distribute(g, update)
         events.add(Event.GroupChanged(g.id))
+        if (groupPlaces[g.id]?.isEmpty() == false) publishPlaces(g, now) // the newcomer gets the places too
     }
 
     fun removeFromGroup(groupId: String, memberIdentity: ByteArray, now: Long) {
@@ -242,7 +247,62 @@ class ChatEngine private constructor(
     fun syncAll(now: Long) {
         store.purgeExpired(now)
         board.purge(now)
+        republishPlacesIfDue(now)
         for (c in contacts.values) offerTo(c, now)
+    }
+
+    // ---------------- shared places ----------------
+
+    /** Places shared with a group (deleted ones left out). */
+    fun sharedPlaces(groupId: String): List<SharedPlace> = groupPlaces[groupId]?.live() ?: emptyList()
+
+    /**
+     * Add (id null) or change a shared place, then send the group's whole list. Any member may do this.
+     * Returns the place id.
+     */
+    fun saveSharedPlace(groupId: String, id: String?, name: String, lat: Double, lon: Double, radiusM: Int, now: Long): String {
+        val g = groups[groupId] ?: throw CryptoException("unknown group")
+        if (!g.session.isActive) throw CryptoException("group is not active")
+        val book = groupPlaces.getOrPut(groupId) { SharedPlaces() }
+        val pid = id ?: hex(Crypto.randomBytes(8))
+        if (id != null && book.get(id)?.deleted != false) throw CryptoException("unknown place")
+        if (id == null && book.live().size >= SharedPlaces.MAX_LIVE) throw CryptoException("too many places")
+        val at = maxOf(now, (book.get(pid)?.editedAt ?: 0L) + 1)
+        val p = SharedPlace(pid, name.trim(), Math.round(lat * 1e6).toInt(), Math.round(lon * 1e6).toInt(), radiusM, false, at, hex(identity.public).take(16))
+        if (!book.put(p)) throw CryptoException("could not save place")
+        publishPlaces(g, now)
+        events.add(Event.PlacesChanged(groupId))
+        return pid
+    }
+
+    fun deleteSharedPlace(groupId: String, id: String, now: Long) {
+        val g = groups[groupId] ?: throw CryptoException("unknown group")
+        val book = groupPlaces[groupId] ?: throw CryptoException("unknown place")
+        val cur = book.get(id) ?: throw CryptoException("unknown place")
+        if (cur.deleted) return
+        book.put(SharedPlace(id, "", 0, 0, 0, true, maxOf(now, cur.editedAt + 1), hex(identity.public).take(16)))
+        publishPlaces(g, now)
+        events.add(Event.PlacesChanged(groupId))
+    }
+
+    private fun publishPlaces(g: Group, now: Long) {
+        if (!g.session.isActive) return
+        val book = groupPlaces[g.id] ?: return
+        book.prune(now)
+        val expires = now + PLACES_TTL_MS
+        val wire = g.session.seal(identity, SharedPlaces.KIND_PLACES, SharedPlaces.encode(book.all()), now, expires)
+        sync.addLocal(wire, expires, now)
+        placesSentAt[g.id] = now
+        for (c in contacts.values) if (g.session.isMember(c.peerIdentity)) offerTo(c, now)
+    }
+
+    /** Re-send each group's list once a day, so members who were away for days or joined later still get it. */
+    private fun republishPlacesIfDue(now: Long) {
+        for ((gid, book) in groupPlaces) {
+            val g = groups[gid] ?: continue
+            if (book.isEmpty() || !g.session.isActive) continue
+            if (now - (placesSentAt[gid] ?: 0L) >= PLACES_REPUBLISH_MS) publishPlaces(g, now)
+        }
     }
 
     // ---------------- receiving ----------------
@@ -326,6 +386,7 @@ class ChatEngine private constructor(
         if (body.size != 16 || g == null || !g.session.isActive || !g.session.isAdmin(c.peerIdentity)) { droppedFrames++; return }
         g.session.markRemoved()
         board.dropGroup(g.id)
+        if (groupPlaces.remove(g.id) != null) events.add(Event.PlacesChanged(g.id))
         syncPeers.clear()
         events.add(Event.RemovedFromGroup(g.id))
     }
@@ -355,6 +416,15 @@ class ChatEngine private constructor(
                         var newest: LocationPoint? = null
                         for (p in pts) if (board.update(g.id, hex(r.sender), p)) newest = p
                         newest?.let { events.add(Event.LocationUpdate(g.id, hex(r.sender), it)) }
+                    }
+                    SharedPlaces.KIND_PLACES -> {
+                        val list = SharedPlaces.decode(r.body)
+                        // Edit times come from the sender's signed record: nothing may claim to be newer than it.
+                        if (list.any { it.editedAt > r.timestamp + 10 * 60_000L }) throw CryptoException("place from the future")
+                        val book = groupPlaces.getOrPut(g.id) { SharedPlaces() }
+                        var changed = false
+                        for (p in list) if (book.put(p)) changed = true
+                        if (changed) events.add(Event.PlacesChanged(g.id))
                     }
                     LocationPayload.KIND_SHARING_STATE -> {
                         if (r.body.size == 1) {
@@ -418,7 +488,11 @@ class ChatEngine private constructor(
         for (r in recs) { bytes(r.id); bytes(r.groupId); bytes(r.wire); o.writeLong(r.expiresAt) }
         o.writeInt(pending.size)
         for (p in pending) { bytes(p.toOnion.toByteArray()); bytes(p.contactId.toByteArray()); bytes(p.frame) }
-        if (includeBoard) bytes(board.serialize())
+        if (includeBoard) {
+            bytes(board.serialize())
+            o.writeInt(groupPlaces.size)
+            for ((gid, book) in groupPlaces) { bytes(gid.toByteArray()); bytes(book.serialize()) }
+        }
         return b.toByteArray()
     }
 
@@ -432,14 +506,16 @@ class ChatEngine private constructor(
         const val KIND_TEXT = 1
         const val LOCATION_TTL_MS = 30L * 60_000
         const val TRACK_TTL_MS = 2L * 3600_000
-        private const val SNAPSHOT_VERSION = 2
+        private const val SNAPSHOT_VERSION = 3
+        const val PLACES_TTL_MS = 47L * 3600_000
+        const val PLACES_REPUBLISH_MS = 24L * 3600_000
 
         private fun hex(b: ByteArray) = b.joinToString("") { "%02x".format(it) }
 
         fun restore(data: ByteArray): ChatEngine = try {
             val i = DataInputStream(ByteArrayInputStream(data))
             val version = i.readUnsignedByte()
-            if (version != 1 && version != 2) throw CryptoException("bad snapshot version")
+            if (version !in 1..3) throw CryptoException("bad snapshot version")
             fun bytes(): ByteArray = ByteArray(i.readInt().also { require(it in 0..2_000_000) }).also { i.readFully(it) }
             val priv = bytes(); val pub = bytes()
             val e = ChatEngine(Crypto.KeyPair(priv, pub), InMemoryRecordStore())
@@ -459,6 +535,9 @@ class ChatEngine private constructor(
                 e.pending.add(Outgoing(String(bytes()), String(bytes()), bytes()))
             }
             if (version >= 2) e.board.restoreFrom(bytes())
+            if (version >= 3) repeat(i.readInt().also { require(it in 0..10_000) }) {
+                val gid = String(bytes()); e.groupPlaces[gid] = SharedPlaces().also { it.restoreFrom(bytes()) }
+            }
             require(i.available() == 0)
             e
         } catch (e: CryptoException) {
