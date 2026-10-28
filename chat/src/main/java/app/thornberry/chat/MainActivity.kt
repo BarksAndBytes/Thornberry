@@ -621,7 +621,7 @@ class MainActivity : Activity() {
             isChecked = Node.mapShowMe()
             setOnCheckedChangeListener { _, v -> Node.setMapShowMe(v); refreshMap() }
         })
-        panel.addView(label("Places: press and hold an empty spot to save one (home, school) and get alerts when people arrive or leave. Press and hold its pin to edit it; press and drag the pin to move it.", 12f, dim = true))
+        panel.addView(label("Places: press and hold an empty spot to save one (home, school) and get alerts when people arrive or leave. Tap its pin to edit it; press and drag the pin to move it.", 12f, dim = true))
         panel.addView(label(
             "Hides your marker on YOUR screen only. People see you according to \"Share my location\" in the chat menu. " +
                 "Map pictures: © OpenStreetMap contributors, fetched through Tor.", 11f, dim = true,
@@ -780,7 +780,7 @@ class MainActivity : Activity() {
                 val name = input.text.toString().trim().ifEmpty { "Place" }.take(40)
                 try {
                     Node.addPlace(name, lat, lon, 200)
-                    toast("Saved \"$name\" (200 m). Press and hold its pin to change the size or who to alert about.")
+                    toast("Saved \"$name\" (200 m). Tap its pin to change the size or who to alert about.")
                     refresh()
                 } catch (e: Exception) { toast("Could not save: ${e.message}") }
             }.setNegativeButton("Cancel", null).show()
@@ -925,7 +925,7 @@ class MainActivity : Activity() {
     // ------------------------------------------------------------ settings
 
     private fun settingsScreen() {
-        topBar("Settings", "Thornberry test build 0.7.0", onBack = { go(Screen.Home) })
+        topBar("Settings", "Thornberry test build 0.7.1", onBack = { go(Screen.Home) })
         val col = scrollColumn()
         col.addView(label("Test data only. No server. Not independently reviewed.", 12f, dim = true))
         col.addView(label(

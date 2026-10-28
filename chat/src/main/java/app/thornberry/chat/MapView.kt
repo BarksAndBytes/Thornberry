@@ -58,7 +58,7 @@ class MapView(ctx: Context) : View(ctx) {
     /** Long press on the map: the latitude and longitude under the finger (used to save a place). */
     var onPlacePick: ((Double, Double) -> Unit)? = null
 
-    /** Long press on a place's pin: open its properties. */
+    /** Tap (press and release) on a place's pin: open its properties. */
     var onPlaceEdit: ((String) -> Unit)? = null
     /** A place was dragged to a new spot (released). */
     var onPlaceMoved: ((String, Double, Double) -> Unit)? = null
@@ -144,13 +144,14 @@ class MapView(ctx: Context) : View(ctx) {
         }
         override fun onDoubleTap(e: MotionEvent): Boolean { zoomBy(1.0); return true }
         override fun onLongPress(e: MotionEvent) {
-            val hit = hitPlace(e.x, e.y)
-            if (hit != null) { pinLongPressed = true; onPlaceEdit?.invoke(hit.id); return }
+            // Holding a pin does nothing, so the finger can start dragging it at any time.
+            if (dragId != null || hitPlace(e.x, e.y) != null) return
             val x = worldX(centerLon, zoom) + (e.x - width / 2.0)
             val y = worldY(centerLat, zoom) + (e.y - height / 2.0)
             onPlacePick?.invoke(latOf(y, zoom), lonOf(x, zoom))
         }
         override fun onSingleTapUp(e: MotionEvent): Boolean {
+            if (!dragMoved) hitPlace(e.x, e.y)?.let { onPlaceEdit?.invoke(it.id); return true } // tap a pin: edit it
             val hit = markers.minByOrNull { dist2(it, e.x, e.y) } ?: return true
             if (dist2(hit, e.x, e.y) < (36 * d) * (36 * d)) onMarkerTap?.invoke(hit)
             return true
@@ -347,7 +348,7 @@ class MapView(ctx: Context) : View(ctx) {
             paint.style = Paint.Style.STROKE; paint.strokeWidth = 2 * d; paint.alpha = 200
             c.drawCircle(x, y, r, paint)
             paint.alpha = 255
-            // the pin: press and hold to edit, press and drag to move
+            // the pin: tap to edit, press and drag to move
             paint.style = Paint.Style.FILL; paint.color = Color.WHITE
             c.drawCircle(x, y, 10 * d, paint)
             paint.color = green
