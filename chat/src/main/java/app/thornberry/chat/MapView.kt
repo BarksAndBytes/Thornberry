@@ -55,6 +55,12 @@ class MapView(ctx: Context) : View(ctx) {
     )
 
     var onMarkerTap: ((Marker) -> Unit)? = null
+    /** Long press on the map: the latitude and longitude under the finger (used to save a place). */
+    var onPlacePick: ((Double, Double) -> Unit)? = null
+
+    class PlaceShape(val name: String, val lat: Double, val lon: Double, val radiusM: Int)
+    private var shapes: List<PlaceShape> = emptyList()
+    fun setPlaces(list: List<PlaceShape>) { shapes = list; invalidate() }
 
     private var markers: List<Marker> = emptyList()
     private var centerLat = 20.0
@@ -96,6 +102,11 @@ class MapView(ctx: Context) : View(ctx) {
             invalidate(); return true
         }
         override fun onDoubleTap(e: MotionEvent): Boolean { zoomBy(1.0); return true }
+        override fun onLongPress(e: MotionEvent) {
+            val x = worldX(centerLon, zoom) + (e.x - width / 2.0)
+            val y = worldY(centerLat, zoom) + (e.y - height / 2.0)
+            onPlacePick?.invoke(latOf(y, zoom), lonOf(x, zoom))
+        }
         override fun onSingleTapUp(e: MotionEvent): Boolean {
             val hit = markers.minByOrNull { dist2(it, e.x, e.y) } ?: return true
             if (dist2(hit, e.x, e.y) < (36 * d) * (36 * d)) onMarkerTap?.invoke(hit)
@@ -184,6 +195,7 @@ class MapView(ctx: Context) : View(ctx) {
         c.drawColor(Color.rgb(0xE8, 0xE6, 0xE0))
         val cx = worldX(centerLon, zoom); val cy = worldY(centerLat, zoom)
         drawTiles(c, cx, cy)
+        drawPlaces(c, cx, cy)
         drawMarkers(c, cx, cy)
         drawNotes(c)
     }
@@ -244,6 +256,25 @@ class MapView(ctx: Context) : View(ctx) {
                 inFlight.remove(key)
                 postInvalidate()
             }
+        }
+    }
+
+    private fun drawPlaces(c: Canvas, cx: Double, cy: Double) {
+        val green = Color.rgb(0x2E, 0x7D, 0x5B)
+        for (sh in shapes) {
+            val mpp = 156543.03392 * cos(Math.toRadians(sh.lat)) / 2.0.pow(zoom)
+            val r = (sh.radiusM / mpp).toFloat()
+            val x = sx(sh.lon, cx); val y = sy(sh.lat, cy)
+            paint.style = Paint.Style.FILL; paint.color = green; paint.alpha = 45
+            c.drawCircle(x, y, r, paint)
+            paint.style = Paint.Style.STROKE; paint.strokeWidth = 2 * d; paint.alpha = 200
+            c.drawCircle(x, y, r, paint)
+            paint.alpha = 255
+            textPaint.textAlign = Paint.Align.CENTER; textPaint.textSize = 12 * d
+            textPaint.color = Color.WHITE; textPaint.style = Paint.Style.STROKE; textPaint.strokeWidth = 3 * d
+            c.drawText(sh.name, x, y + 4 * d, textPaint)
+            textPaint.style = Paint.Style.FILL; textPaint.color = green
+            c.drawText(sh.name, x, y + 4 * d, textPaint)
         }
     }
 

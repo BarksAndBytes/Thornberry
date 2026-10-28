@@ -53,6 +53,7 @@ class ChatService : Service() {
         const val ACTION_LOCATION_REFRESH = "app.thornberry.chat.LOCATION_REFRESH"
         private const val CHANNEL_STATUS = "status"
         private const val CHANNEL_MSG = "messages"
+        private const val CHANNEL_PLACES = "places"
         private const val NOTIFICATION_ID = 1
         private const val ONION_PORT = 80
         private const val CONNECT_TIMEOUT_MS = 90_000
@@ -95,6 +96,7 @@ class ChatService : Service() {
             running = true
             Node.sendHook = { requestSend() }
             Node.notifyHook = { text -> notifyMessage(text) }
+            Node.placeHook = { text -> notifyPlace(text) }
             io.execute { runTor() }
         }
         return START_STICKY
@@ -343,7 +345,7 @@ class ChatService : Service() {
 
     private fun shutdown() {
         running = false
-        Node.sendHook = null; Node.notifyHook = null
+        Node.sendHook = null; Node.notifyHook = null; Node.placeHook = null
         Node.torState = "STOPPED"; Node.onion = ""; Node.changed()
         try { server?.close() } catch (_: Exception) {}
         scheduler.shutdownNow()
@@ -372,6 +374,28 @@ class ChatService : Service() {
         }
     }
 
+    private var placeSeq = 0
+
+    /** "Alex arrived at School". The lock screen shows only "Place alert" while the phone is locked. */
+    private fun notifyPlace(text: String) {
+        try {
+            val open = PendingIntent.getActivity(
+                this, 0, Intent(this, MainActivity::class.java),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            )
+            val pub = Notification.Builder(this, CHANNEL_PLACES)
+                .setContentTitle("Thornberry").setContentText("Place alert")
+                .setSmallIcon(android.R.drawable.ic_dialog_map).build()
+            val n = Notification.Builder(this, CHANNEL_PLACES)
+                .setContentTitle("Thornberry").setContentText(text)
+                .setSmallIcon(android.R.drawable.ic_dialog_map)
+                .setVisibility(Notification.VISIBILITY_PRIVATE).setPublicVersion(pub)
+                .setAutoCancel(true).setContentIntent(open).build()
+            getSystemService(NotificationManager::class.java).notify(200 + (placeSeq++ % 50), n)
+        } catch (_: Exception) {
+        }
+    }
+
     private fun buildNotification(text: String): Notification {
         val open = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
@@ -390,6 +414,7 @@ class ChatService : Service() {
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(NotificationChannel(CHANNEL_STATUS, "Connection status", NotificationManager.IMPORTANCE_LOW))
         nm.createNotificationChannel(NotificationChannel(CHANNEL_MSG, "Messages", NotificationManager.IMPORTANCE_DEFAULT))
+        nm.createNotificationChannel(NotificationChannel(CHANNEL_PLACES, "Place alerts", NotificationManager.IMPORTANCE_DEFAULT))
         val n = buildNotification(text)
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)

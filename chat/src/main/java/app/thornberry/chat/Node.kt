@@ -2,7 +2,10 @@ package app.thornberry.chat
 
 import android.content.Context
 import android.content.SharedPreferences
+import app.thornberry.crypto.GeoEvent
 import app.thornberry.crypto.LocationBoard
+import app.thornberry.crypto.Place
+import app.thornberry.crypto.PlaceBook
 import app.thornberry.crypto.Precision
 import android.os.Handler
 import android.os.Looper
@@ -31,6 +34,8 @@ object Node {
     private var engine: ChatEngine? = null
     private val history = ArrayList<Msg>()
     private var pairingLocal: Pairing.Local? = null
+    private var placeBook = PlaceBook()
+    private var placesBlocked = false
     /** A pairing that finished and still needs the people to compare the safety code. */
     @Volatile var pendingPairing: ChatEngine.PairingResult? = null
 
@@ -43,8 +48,10 @@ object Node {
     val listeners = CopyOnWriteArrayList<() -> Unit>()
     @Volatile var sendHook: (() -> Unit)? = null
     @Volatile var notifyHook: ((String) -> Unit)? = null
+    @Volatile var placeHook: ((String) -> Unit)? = null
 
     private const val ENGINE_FILE = "engine.bin"
+    private const val PLACES_FILE = "places.bin"
     private const val HISTORY_FILE = "history.bin"
     private const val HISTORY_MAX = 5000
 
@@ -64,6 +71,13 @@ object Node {
                     ChatEngine.restore(snap)
                 }
                 SecureStorage.read(dir, HISTORY_FILE)?.let { loadHistory(it) }
+                try {
+                    SecureStorage.read(dir, PLACES_FILE)?.let { placeBook = PlaceBook.restore(it) }
+                } catch (e: Exception) {
+                    // Keep the unreadable file as it is (never overwrite it) and run without places.
+                    placesBlocked = true
+                    ChatLog.err("places-load", e)
+                }
             } catch (e: Exception) {
                 // Never overwrite unreadable state with an empty one: the owner may be able to recover it.
                 engine = null
@@ -97,6 +111,8 @@ object Node {
         synchronized(lock) {
             val e = engine ?: throw IllegalStateException(loadError ?: "not ready")
             result = block(e)
+            val geoSenders = HashSet<String>()
+            val meHex = e.identityPublic.joinToString("") { "%02x".format(it) }
             for (ev in e.drainEvents()) {
                 when (ev) {
                     is ChatEngine.Event.DirectText -> {
@@ -109,7 +125,7 @@ object Node {
                     is ChatEngine.Event.GroupJoined -> if (!isDmName(ev.groupName)) notifyHook?.invoke("You were added to a group")
                     is ChatEngine.Event.RemovedFromGroup -> notifyHook?.invoke("You were removed from a group")
                     is ChatEngine.Event.GroupChanged -> {}
-                    is ChatEngine.Event.LocationUpdate -> {}
+                    is ChatEngine.Event.LocationUpdate -> if (ev.sender != meHex) geoSenders.add(ev.sender)
                     is ChatEngine.Event.SharingState -> {}
                     is ChatEngine.Event.Paired -> {
                         ChatLog.log("PAIRED_BY_RESPONSE")
@@ -119,6 +135,7 @@ object Node {
                     }
                 }
             }
+            if (geoSenders.isNotEmpty() && placeBook.hasPlaces()) runGeofence(e, geoSenders)
             trigger = e.pendingFrames().isNotEmpty()
             SecureStorage.write(dir, ENGINE_FILE, e.snapshot())
             SecureStorage.write(dir, HISTORY_FILE, saveHistory())
@@ -126,6 +143,56 @@ object Node {
         if (trigger) sendHook?.invoke()
         changed()
         return result
+    }
+
+    /** Check the people whose position just changed against our places. Runs inside [use], on this phone only. */
+    private fun runGeofence(e: ChatEngine, senders: Set<String>) {
+        val now = System.currentTimeMillis()
+        try {
+            for (s in senders) {
+                val pts = e.groupList().flatMap { g -> e.locations(g.id).filter { it.sender == s }.flatMap { it.trail } }
+                    .distinctBy { it.timestamp }
+                val who = e.contact(s)?.name ?: "A member"
+                for (ev in placeBook.feed(s, pts, now)) {
+                    ChatLog.log("PLACE_EVENT", "arrived=${ev.arrived} notify=${ev.notify}")
+                    if (ev.notify) placeHook?.invoke("$who ${if (ev.arrived) "arrived at" else "left"} ${ev.placeName}")
+                }
+            }
+            savePlaces()
+        } catch (ex: Exception) {
+            ChatLog.err("geofence", ex)
+        }
+    }
+
+    private fun savePlaces() { if (!placesBlocked) SecureStorage.write(dir, PLACES_FILE, placeBook.serialize()) }
+
+    fun placesUnreadable(): Boolean = synchronized(lock) { placesBlocked }
+    fun places(): List<Place> = synchronized(lock) { placeBook.list() }
+    fun placeEvents(): List<GeoEvent> = synchronized(lock) { placeBook.events() }
+
+    fun addPlace(name: String, lat: Double, lon: Double, radiusM: Int, watch: Set<String>? = null): Place {
+        val p = synchronized(lock) {
+            check(!placesBlocked) { "saved places could not be read" }
+            placeBook.add(name, lat, lon, radiusM, watch).also { savePlaces() }
+        }
+        ChatLog.log("PLACE_ADDED", "radius=$radiusM")
+        changed(); return p
+    }
+
+    fun updatePlace(id: String, name: String, radiusM: Int, watch: Set<String>?) {
+        synchronized(lock) {
+            check(!placesBlocked) { "saved places could not be read" }
+            placeBook.update(id, name, radiusM, watch); savePlaces()
+        }
+        changed()
+    }
+
+    fun removePlace(id: String) {
+        synchronized(lock) {
+            check(!placesBlocked) { "saved places could not be read" }
+            placeBook.remove(id); savePlaces()
+        }
+        changed()
     }
 
     fun ready(): Boolean = synchronized(lock) { engine != null }

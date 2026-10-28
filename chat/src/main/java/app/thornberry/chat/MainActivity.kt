@@ -53,6 +53,7 @@ class MainActivity : Activity() {
         object Home : Screen()
         object Pair : Screen()
         object Settings : Screen()
+        object Places : Screen()
         class Chat(val conv: String) : Screen()
         class Map(val conv: String, val focus: String?) : Screen()
     }
@@ -163,6 +164,7 @@ class MainActivity : Activity() {
             is Screen.Home -> homeScreen()
             is Screen.Pair -> pairScreen()
             is Screen.Settings -> settingsScreen()
+            is Screen.Places -> placesScreen()
             is Screen.Chat -> chatScreen(s.conv)
             is Screen.Map -> mapScreen(s.conv, s.focus)
         }
@@ -265,7 +267,7 @@ class MainActivity : Activity() {
             Node.torState == "CONNECTED" -> "Connected through Tor"
             else -> "Connecting… (${Node.torState.lowercase()})"
         }
-        topBar("Thornberry", status, actions = listOf("⚙" to { _: View -> go(Screen.Settings) }))
+        topBar("Thornberry", status, actions = listOf("📌" to { _: View -> go(Screen.Places) }, "⚙" to { _: View -> go(Screen.Settings) }))
         val frame = FrameLayout(this)
         shell.addView(frame, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
@@ -582,6 +584,7 @@ class MainActivity : Activity() {
         val mv = MapView(this)
         mapView = mv
         mv.focus(focus)
+        mv.onPlacePick = { lat, lon -> savePlaceDialog(lat, lon) }
         frame.addView(mv, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         val ctl = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         fun round(t: String, f: () -> Unit) = TextView(this).apply {
@@ -603,6 +606,7 @@ class MainActivity : Activity() {
             isChecked = Node.mapShowMe()
             setOnCheckedChangeListener { _, v -> Node.setMapShowMe(v); refreshMap() }
         })
+        panel.addView(label("Tip: press and hold on the map to save a place (home, school) and get alerts when people arrive or leave.", 12f, dim = true))
         panel.addView(label(
             "Hides your marker on YOUR screen only. People see you according to \"Share my location\" in the chat menu. " +
                 "Map pictures: © OpenStreetMap contributors, fetched through Tor.", 11f, dim = true,
@@ -660,6 +664,7 @@ class MainActivity : Activity() {
             row.addView(col)
             box.addView(row)
         }
+        mv.setPlaces(Node.places().map { MapView.PlaceShape(it.name, it.lat, it.lon, it.radiusM) })
         mv.setMarkers(markers)
     }
 
@@ -748,10 +753,107 @@ class MainActivity : Activity() {
         })
     }
 
+    // ------------------------------------------------------------ places (geofences)
+
+    private val radii = listOf(100, 200, 500, 1000)
+    private fun radiusLabels() = listOf("100 m (a house)", "200 m", "500 m (a campus)", "1 km")
+
+    private fun savePlaceDialog(lat: Double, lon: Double) {
+        if (Node.placesUnreadable()) { toast("Saved places could not be read; nothing was changed"); return }
+        val input = EditText(this).apply { hint = "Name (Home, School…)"; isSingleLine = true }
+        AlertDialog.Builder(this).setTitle("Save this spot as a place")
+            .setMessage("You get an alert when people arrive or leave. Places stay on this phone only; nobody else is told.")
+            .setView(input)
+            .setPositiveButton("Next") { _, _ ->
+                val name = input.text.toString().trim().ifEmpty { "Place" }.take(40)
+                choiceDialog("How big is it?", "Pick the radius around the spot you pressed.", radiusLabels()) { i ->
+                    try {
+                        Node.addPlace(name, lat, lon, radii[i])
+                        toast("Saved \"$name\". Alerts for everyone sharing with you; change in Places.")
+                        refresh()
+                    } catch (e: Exception) { toast("Could not save: ${e.message}") }
+                }
+            }.setNegativeButton("Cancel", null).show()
+    }
+
+    private fun placesScreen() {
+        topBar("Places", "Alerts are worked out on this phone", onBack = { go(Screen.Home) })
+        val col = scrollColumn()
+        if (Node.placesUnreadable()) col.addView(label("Saved places could not be read, so they are off. Nothing was overwritten.", 14f, true))
+        col.addView(label(
+            "Open a chat's map and press and hold on a spot to save a place. You are alerted when someone sharing their location " +
+                "with you arrives or leaves. Places are never sent to anyone.", 13f, dim = true,
+        ))
+        col.addView(label(
+            "People who share at \"About 1 km\" or \"City level\" cannot trigger alerts, because the app cannot tell whether they are " +
+                "inside or outside. \"About 100 m\" works for places of 200 m or more.", 12f, dim = true,
+        ))
+        val names = Node.read { e -> e.contactList().associate { it.id to it.name } }
+        val places = Node.places()
+        col.addView(label("Your places", 16f, true).apply { setPadding(0, dp(12), 0, 0) })
+        if (places.isEmpty()) col.addView(label("None yet.", 14f, dim = true))
+        for (pl in places) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL; setPadding(0, dp(8), 0, dp(8))
+                setOnClickListener { placeActions(pl) }
+            }
+            row.addView(label(pl.name, 16f, true))
+            val who = pl.watch?.let { w -> if (w.isEmpty()) "nobody" else w.joinToString { names[it] ?: "a contact" } } ?: "everyone sharing with you"
+            row.addView(label("${pl.radiusM} m radius · alerts for $who", 13f, dim = true))
+            col.addView(row)
+            col.addView(View(this).apply { setBackgroundColor(th.divider) }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1))
+        }
+        col.addView(label("Recent activity", 16f, true).apply { setPadding(0, dp(16), 0, 0) })
+        val events = Node.placeEvents().take(30)
+        if (events.isEmpty()) col.addView(label("Nothing yet.", 14f, dim = true))
+        for (ev in events) {
+            val who = names[ev.person] ?: "A member"
+            col.addView(label(
+                "$who ${if (ev.arrived) "arrived at" else "left"} ${ev.placeName} · ${timeLabel(ev.atMs)}" + if (ev.notify) "" else " (earlier)",
+                14f,
+            ))
+        }
+    }
+
+    private fun placeActions(pl: app.thornberry.crypto.Place) {
+        choiceDialog(pl.name, "${pl.radiusM} m radius", listOf("Rename", "Change size", "Choose who to alert about", "Delete this place")) { i ->
+            try {
+                when (i) {
+                    0 -> {
+                        val input = EditText(this).apply { setText(pl.name); isSingleLine = true }
+                        AlertDialog.Builder(this).setTitle("Rename").setView(input)
+                            .setPositiveButton("Save") { _, _ ->
+                                try { Node.updatePlace(pl.id, input.text.toString().trim().ifEmpty { pl.name }.take(40), pl.radiusM, pl.watch); refresh() }
+                                catch (e: Exception) { toast("Could not save: ${e.message}") }
+                            }.setNegativeButton("Cancel", null).show()
+                    }
+                    1 -> choiceDialog("Size", "Radius around the saved spot.", radiusLabels()) { j ->
+                        try { Node.updatePlace(pl.id, pl.name, radii[j], pl.watch); refresh() } catch (e: Exception) { toast("Could not save: ${e.message}") }
+                    }
+                    2 -> {
+                        val contacts = Node.read { it.contactList().map { c -> c.id to c.name } }
+                        if (contacts.isEmpty()) { toast("Pair with someone first"); return@choiceDialog }
+                        val checked = BooleanArray(contacts.size) { pl.watch?.contains(contacts[it].first) ?: true }
+                        AlertDialog.Builder(this).setTitle("Alert me about…")
+                            .setMultiChoiceItems(contacts.map { it.second }.toTypedArray(), checked) { _, k, v -> checked[k] = v }
+                            .setPositiveButton("Save") { _, _ ->
+                                val sel = contacts.indices.filter { checked[it] }.map { contacts[it].first }.toSet()
+                                try { Node.updatePlace(pl.id, pl.name, pl.radiusM, if (sel.size == contacts.size) null else sel); refresh() }
+                                catch (e: Exception) { toast("Could not save: ${e.message}") }
+                            }.setNegativeButton("Cancel", null).show()
+                    }
+                    else -> AlertDialog.Builder(this).setTitle("Delete ${pl.name}?")
+                        .setPositiveButton("Delete") { _, _ -> try { Node.removePlace(pl.id); refresh() } catch (e: Exception) { toast("Could not delete: ${e.message}") } }
+                        .setNegativeButton("Cancel", null).show()
+                }
+            } catch (e: Exception) { toast("Could not change place: ${e.message}") }
+        }
+    }
+
     // ------------------------------------------------------------ settings
 
     private fun settingsScreen() {
-        topBar("Settings", "Thornberry test build 0.5.2", onBack = { go(Screen.Home) })
+        topBar("Settings", "Thornberry test build 0.6.0", onBack = { go(Screen.Home) })
         val col = scrollColumn()
         col.addView(label("Test data only. No server. Not independently reviewed.", 12f, dim = true))
         col.addView(label(
