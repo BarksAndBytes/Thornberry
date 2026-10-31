@@ -40,3 +40,12 @@ Settings > Apps > Dual apps > turn on **Thornberry (test)**. Open the copy and d
 4. Tap a line to open that position in your map app (that app may contact its own servers; Thornberry itself has no map and sends nothing to any map service).
 5. Turn sharing Off on one copy: the other should show "sharing paused".
 6. What to report: whether updates appear, how often, whether the notification stays during screen-off, and any battery drop that looks too high. Save the diagnostic log (home screen) if something looks wrong; it records when location was sent, never where.
+
+## File transfer test (0.10.0)
+How it works: a file is split into 256 KB pieces, each encrypted with a key that only the chat's members receive, and each checked against a list of piece fingerprints before it is kept. Pieces come from anyone in the chat who has them; in a group, members you are paired with fetch pieces for you if they do not have them yet. Nothing is downloaded until you tap.
+1. Both copies on 0.10.0. In a direct chat, tap 📎 and pick a small photo (under 1 MB). The bubble shows "Preparing…", then "Shared".
+2. On the other copy the bubble says "Tap to download". Tap, confirm, watch the percentage. When done, tap again, "Save to phone…", pick a folder, then open the saved file and compare it with the original.
+3. Repeat with a larger file (50 to 200 MB). Stop Tor ("Stop connection" in Settings) halfway on either copy, start it again: the download continues where it stopped.
+4. In a group, send a file and download it on the other copy.
+5. Stop sharing: on the sender, tap your own file bubble and "Stop sharing"; a new download on the other copy should no longer progress.
+Report: speed (MB per minute), anything stuck, and save the diagnostic log (it lists PIECES_OUT, FILE_DONE, FILE_PIECE_BAD and similar, never file names or contents).

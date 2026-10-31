@@ -59,6 +59,10 @@ class ChatEngine private constructor(
         class SharingState(val groupId: String, val sender: String, val paused: Boolean) : Event()
         /** The group's shared places changed (someone added, edited or deleted one). */
         class PlacesChanged(val groupId: String) : Event()
+        /** A file-transfer message from a paired contact (offer in a direct chat, piece request, piece list). */
+        class FileControl(val contactId: String, val body: ByteArray) : Event()
+        /** A file shared in a group (the body is a [FileXfer] offer). */
+        class GroupFile(val groupId: String, val sender: String, val body: ByteArray, val timestamp: Long) : Event()
     }
 
     /** A frame to deliver to a contact's onion address. Keep until delivery succeeds. */
@@ -184,6 +188,22 @@ class ChatEngine private constructor(
         val body = ByteArrayOutputStream().also { DataOutputStream(it).apply { writeByte(name.size); write(name); write(update) } }.toByteArray()
         for (c in contacts.values) if (g.session.isMember(c.peerIdentity)) queue(c, TYPE_GROUP_UPDATE, body)
         syncPeers.clear() // shared-group sets changed
+    }
+
+    /** Send a file-transfer message to a paired contact (end to end encrypted like a text). */
+    fun sendFileControl(contactId: String, body: ByteArray) {
+        val c = contacts[contactId] ?: throw CryptoException("unknown contact")
+        require(body.size <= 590_000) { "file message too large" }
+        queue(c, TYPE_FILE_CTRL, body)
+    }
+
+    /** Share a file offer with a group (group encrypted, signed, relayed like a message). */
+    fun shareGroupFile(groupId: String, offerBody: ByteArray, now: Long) {
+        val g = groups[groupId] ?: throw CryptoException("unknown group")
+        val expires = now + FILE_OFFER_TTL_MS
+        val wire = g.session.seal(identity, KIND_FILE_OFFER, offerBody, now, expires)
+        sync.addLocal(wire, expires, now)
+        for (c in contacts.values) if (g.session.isMember(c.peerIdentity)) offerTo(c, now)
     }
 
     fun sendGroupText(groupId: String, text: String, now: Long, ttlMs: Long = 7L * 24 * 3600 * 1000) {
@@ -328,6 +348,7 @@ class ChatEngine private constructor(
                 TYPE_GROUP_UPDATE -> onGroupUpdate(c, body, now)
                 TYPE_SYNC -> onSync(c, body, now)
                 TYPE_GROUP_REMOVED -> onRemoved(c, body)
+                TYPE_FILE_CTRL -> events.add(Event.FileControl(c.id, body))
                 else -> droppedFrames++
             }
         } catch (e: Exception) {
@@ -417,6 +438,7 @@ class ChatEngine private constructor(
                         for (p in pts) if (board.update(g.id, hex(r.sender), p)) newest = p
                         newest?.let { events.add(Event.LocationUpdate(g.id, hex(r.sender), it)) }
                     }
+                    KIND_FILE_OFFER -> events.add(Event.GroupFile(g.id, hex(r.sender), r.body, r.timestamp))
                     SharedPlaces.KIND_PLACES -> {
                         val list = SharedPlaces.decode(r.body)
                         // Edit times come from the sender's signed record: nothing may claim to be newer than it.
@@ -502,6 +524,9 @@ class ChatEngine private constructor(
         const val TYPE_SYNC = 3
         const val TYPE_HELLO = 4
         const val TYPE_GROUP_REMOVED = 5
+        const val TYPE_FILE_CTRL = 6
+        const val KIND_FILE_OFFER = 6
+        const val FILE_OFFER_TTL_MS = 47L * 3600_000
         private val ZERO_TAG = ByteArray(16)
         const val KIND_TEXT = 1
         const val LOCATION_TTL_MS = 30L * 60_000

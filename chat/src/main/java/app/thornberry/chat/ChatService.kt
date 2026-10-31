@@ -97,6 +97,8 @@ class ChatService : Service() {
             Node.sendHook = { requestSend() }
             Node.notifyHook = { text -> notifyMessage(text) }
             Node.placeHook = { text -> notifyPlace(text) }
+            Files.sendHook = { requestPieceSend() }
+            Files.doneHook = { notifyMessage("File received: tap to save it") }
             io.execute { runTor() }
         }
         return START_STICKY
@@ -146,6 +148,7 @@ class ChatService : Service() {
             io.execute { acceptLoop(srv) }
             io.execute { locationSetup() }
             scheduler.scheduleWithFixedDelay({ requestSend() }, 20, 30, TimeUnit.SECONDS)
+            scheduler.scheduleWithFixedDelay({ fileTick() }, 10, 2, TimeUnit.SECONDS)
             scheduler.scheduleWithFixedDelay({
                 try { Node.syncNow() } catch (_: Exception) {}
             }, 60, 180, TimeUnit.SECONDS)
@@ -181,6 +184,12 @@ class ChatService : Service() {
                     if (len <= 0 || len > MAX_FRAME) break
                     val frame = ByteArray(len)
                     inp.readFully(frame)
+                    if (app.thornberry.crypto.FileXfer.isPieceFrame(frame)) {
+                        // File pieces bypass the message engine; they are checked against the file's manifest.
+                        try { Files.onPieceFrame(frame) } catch (e: Exception) { ChatLog.err("piece", e) }
+                        out.writeByte(1); out.flush()
+                        continue
+                    }
                     try { Node.use { e -> e.receiveFrame(frame, System.currentTimeMillis()) } } catch (e: Exception) { ChatLog.err("receive", e) }
                     ChatLog.log("FRAME_IN", "bytes=${frame.size} dropped=${Node.read { it.droppedFrames }}")
                     out.writeByte(1); out.flush()
@@ -231,6 +240,62 @@ class ChatService : Service() {
         } catch (e: Exception) {
             // Stays queued; retried every 30 seconds.
             ChatLog.log("FRAME_OUT_FAIL", "${e.javaClass.simpleName} queued=${frames.size}")
+        }
+    }
+
+    // ---------------- file pieces ----------------
+
+    private val pieceInFlight = HashSet<String>()
+
+    private fun fileTick() {
+        if (!running || Node.torState != "CONNECTED") return
+        try {
+            val reqs = Files.tick(System.currentTimeMillis())
+            if (reqs.isNotEmpty()) Node.use { e -> for ((cid, body) in reqs) try { e.sendFileControl(cid, body) } catch (_: Exception) {} }
+            requestPieceSend()
+        } catch (e: Exception) {
+            ChatLog.err("fileTick", e)
+        }
+    }
+
+    private fun requestPieceSend() {
+        if (!running || Node.torState != "CONNECTED") return
+        for (cid in Files.contactsWithOutbound()) {
+            synchronized(pieceInFlight) { if (!pieceInFlight.add(cid)) null else Unit } ?: continue
+            io.execute { try { sendPieces(cid) } finally { synchronized(pieceInFlight) { pieceInFlight.remove(cid) } } }
+        }
+    }
+
+    /** Push requested pieces to one contact over its onion address (a separate connection from messages). */
+    private fun sendPieces(contactId: String) {
+        val onion = try { Node.read { it.contact(contactId)?.onion } } catch (_: Exception) { null } ?: return
+        var rounds = 0
+        while (running && rounds++ < 50) {
+            val batch = Files.nextBatch(contactId, MAX_FRAMES_PER_CONNECTION - 4)
+            if (batch.isEmpty()) return
+            var sent = 0
+            try {
+                val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", socksPort))
+                Socket(proxy).use { s ->
+                    s.soTimeout = 120_000
+                    s.connect(InetSocketAddress.createUnresolved("$onion.onion", ONION_PORT), CONNECT_TIMEOUT_MS)
+                    val out = DataOutputStream(BufferedOutputStream(s.getOutputStream()))
+                    val inp = DataInputStream(BufferedInputStream(s.getInputStream()))
+                    for ((id, index) in batch) {
+                        val frame = Files.buildPiece(id, index)
+                        if (frame == null) { sent++; continue }
+                        out.writeInt(frame.size); out.write(frame); out.flush()
+                        if (inp.readByte().toInt() != 1) break
+                        sent++
+                    }
+                }
+                ChatLog.log("PIECES_OUT", "n=$sent")
+            } catch (e: Exception) {
+                ChatLog.log("PIECES_OUT_FAIL", e.javaClass.simpleName)
+                Files.requeue(contactId, batch.drop(sent))
+                return
+            }
+            if (sent < batch.size) { Files.requeue(contactId, batch.drop(sent)); return }
         }
     }
 
@@ -346,6 +411,7 @@ class ChatService : Service() {
     private fun shutdown() {
         running = false
         Node.sendHook = null; Node.notifyHook = null; Node.placeHook = null
+        Files.sendHook = null; Files.doneHook = null
         Node.torState = "STOPPED"; Node.onion = ""; Node.changed()
         try { server?.close() } catch (_: Exception) {}
         scheduler.shutdownNow()

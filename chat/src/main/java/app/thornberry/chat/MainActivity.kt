@@ -340,7 +340,7 @@ class MainActivity : Activity() {
         })
         val last = r.last
         mid.addView(TextView(this).apply {
-            text = if (last == null) "No messages yet" else (if (last.outgoing) "You: " else "") + last.text.replace('\n', ' ')
+            text = if (last == null) "No messages yet" else (if (last.outgoing) "You: " else "") + Files.previewText(last.text).replace('\n', ' ')
             textSize = 14f; setTextColor(th.textDim); isSingleLine = true; ellipsize = TextUtils.TruncateAt.END
         })
         row.addView(mid, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
@@ -428,6 +428,14 @@ class MainActivity : Activity() {
                 } catch (e: Exception) { toast("Could not send: ${e.message}") }
             }
         }
+        bar.addView(TextView(this).apply {
+            text = "📎"; textSize = 22f; gravity = Gravity.CENTER
+            setOnClickListener {
+                pendingAttachConv = conv
+                val i = Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
+                try { startActivityForResult(i, 4401) } catch (e: Exception) { toast("No file picker available") }
+            }
+        }, LinearLayout.LayoutParams(dp(42), dp(46)).apply { rightMargin = dp(4) })
         bar.addView(input, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         bar.addView(send, LinearLayout.LayoutParams(dp(46), dp(46)).apply { leftMargin = dp(8) })
         shell.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
@@ -561,6 +569,16 @@ class MainActivity : Activity() {
             }
             if (head.childCount > 0) bubble.addView(head)
         }
+        if (m.text.startsWith(Files.MARK)) {
+            bubble.addView(fileCard(m.text.removePrefix(Files.MARK), mine))
+            bubble.setOnClickListener { fileAction(m.text.removePrefix(Files.MARK)) }
+            bubble.addView(TextView(this).apply {
+                text = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(m.ts)); textSize = 11f
+                setTextColor(if (mine) 0xB3FFFFFF.toInt() else th.textDim)
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { gravity = Gravity.END })
+            row.addView(bubble, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            return row
+        }
         val body = TextView(this).apply {
             text = m.text; textSize = 16f; setTextColor(if (mine) Color.WHITE else th.text)
             includeFontPadding = false
@@ -577,6 +595,80 @@ class MainActivity : Activity() {
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { gravity = Gravity.END })
         row.addView(bubble, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         return row
+    }
+
+    // ------------------------------------------------------------ files
+
+    private var pendingAttachConv: String? = null
+    private var pendingSaveId: String? = null
+
+    private fun sizeText(b: Long): String = when {
+        b < 1024 -> "$b B"
+        b < 1024L * 1024 -> "%.0f KB".format(Locale.US, b / 1024.0)
+        b < 1024L * 1024 * 1024 -> "%.1f MB".format(Locale.US, b / 1048576.0)
+        else -> "%.2f GB".format(Locale.US, b / 1073741824.0)
+    }
+
+    private fun fileStatus(f: Files.Info?): String {
+        if (f == null) return "File no longer available"
+        return when (f.state) {
+            Files.ST_PREPARING -> "Preparing… ${f.pct}%"
+            Files.ST_SHARED -> "Shared · available while your phone is online"
+            Files.ST_OFFERED -> "Tap to download"
+            Files.ST_DOWNLOADING -> "Downloading ${f.pct}% · tap to stop"
+            Files.ST_DONE -> if (f.mine) "Shared" else "Downloaded · tap to save"
+            else -> f.note.ifEmpty { "Not available" }
+        }
+    }
+
+    private fun fileCard(id: String, mine: Boolean): View {
+        val f = Files.info(id)
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val w = (resources.displayMetrics.widthPixels * 0.62).toInt()
+        col.addView(TextView(this).apply {
+            text = "📎 " + (f?.name ?: "File"); textSize = 15f; setTypeface(typeface, Typeface.BOLD)
+            setTextColor(if (mine) Color.WHITE else th.text); maxLines = 2; ellipsize = TextUtils.TruncateAt.MIDDLE
+        }, LinearLayout.LayoutParams(w, ViewGroup.LayoutParams.WRAP_CONTENT))
+        col.addView(TextView(this).apply {
+            text = (f?.let { sizeText(it.size) + " · " } ?: "") + fileStatus(f); textSize = 13f
+            setTextColor(if (mine) 0xDDFFFFFF.toInt() else th.textDim)
+        }, LinearLayout.LayoutParams(w, ViewGroup.LayoutParams.WRAP_CONTENT))
+        if (f != null && (f.state == Files.ST_DOWNLOADING || f.state == Files.ST_PREPARING)) {
+            col.addView(android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+                max = 100; progress = f.pct
+            }, LinearLayout.LayoutParams(w, dp(8)).apply { topMargin = dp(4) })
+        }
+        return col
+    }
+
+    private fun fileAction(id: String) {
+        val f = Files.info(id) ?: return
+        when {
+            f.mine && f.state == Files.ST_SHARED -> AlertDialog.Builder(this).setTitle(f.name)
+                .setMessage("People in this chat can download it while Thornberry is running on your phone and the original file is still there.")
+                .setPositiveButton("Stop sharing") { _, _ -> Files.stopSharing(id) }
+                .setNegativeButton("Close", null).show()
+            f.mine -> {}
+            f.state == Files.ST_OFFERED -> AlertDialog.Builder(this).setTitle("Download ${f.name}?")
+                .setMessage(
+                    "${sizeText(f.size)}. It arrives in encrypted pieces from people in this chat who have it (relayed through members " +
+                        "if needed), and is kept encrypted until you save it. Over Tor this can take a while; it resumes after interruptions.",
+                ).setPositiveButton("Download") { _, _ -> Files.startDownload(id) }
+                .setNegativeButton("Not now", null).show()
+            f.state == Files.ST_DOWNLOADING -> AlertDialog.Builder(this).setTitle("Stop downloading?")
+                .setMessage("What has arrived so far is deleted. You can download it again later.")
+                .setPositiveButton("Stop and delete") { _, _ -> Files.deleteLocal(id) }
+                .setNegativeButton("Keep going", null).show()
+            f.state == Files.ST_DONE -> choiceDialog(f.name, sizeText(f.size), listOf("Save to phone…", "Delete from Thornberry")) { i ->
+                if (i == 0) {
+                    pendingSaveId = id
+                    val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                        .setType(f.mime.ifEmpty { "application/octet-stream" }).putExtra(Intent.EXTRA_TITLE, f.name)
+                    try { startActivityForResult(intent, 4402) } catch (e: Exception) { toast("No file picker available") }
+                } else Files.deleteLocal(id)
+            }
+            else -> toast(f.note.ifEmpty { "Not available" })
+        }
     }
 
     private fun Theme.colorForText(id: String): Int {
@@ -1031,7 +1123,7 @@ class MainActivity : Activity() {
     // ------------------------------------------------------------ settings
 
     private fun settingsScreen() {
-        topBar("Settings", "Thornberry test build 0.9.1", onBack = { go(Screen.Home) })
+        topBar("Settings", "Thornberry test build 0.10.1", onBack = { go(Screen.Home) })
         val col = scrollColumn()
         col.addView(label("Test data only. No server. Not independently reviewed.", 12f, dim = true))
         col.addView(label(
@@ -1211,6 +1303,16 @@ class MainActivity : Activity() {
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == 4401) {
+            val uri = data?.data; val conv = pendingAttachConv; pendingAttachConv = null
+            if (resultCode == RESULT_OK && uri != null && conv != null) { Files.sendFile(conv, uri); toast("Preparing the file…") }
+            return
+        }
+        if (requestCode == 4402) {
+            val uri = data?.data; val id = pendingSaveId; pendingSaveId = null
+            if (resultCode == RESULT_OK && uri != null && id != null) Files.saveTo(id, uri) { msg -> runOnUiThread { toast(msg) } }
+            return
+        }
         if (requestCode == 4301) {
             val uri = data?.data
             if (resultCode == RESULT_OK && uri != null) {
