@@ -290,9 +290,15 @@ class Swarm(val chunks: Int, val manifestParts: Int, val perPeer: Int = 12, val 
         var rr = 0
         for (i in needed) {
             var chosen: String? = null
-            for (k in peers.indices) {
-                val p = peers[(rr + k) % peers.size]
-                if ((load[p] ?: 0) < perPeer && mayHave(p, i)) { chosen = p; rr = (rr + k + 1) % peers.size; break }
+            // Prefer peers known to have the piece; then peers that might (unknown, or fetching it).
+            for (pass in 0..1) {
+                for (k in peers.indices) {
+                    val p = peers[(rr + k) % peers.size]
+                    if ((load[p] ?: 0) >= perPeer) continue
+                    val ok = if (pass == 0) i >= 0 && peerHas[p]?.get(i) == true else mayHave(p, i)
+                    if (ok) { chosen = p; rr = (rr + k + 1) % peers.size; break }
+                }
+                if (chosen != null) break
             }
             val p = chosen ?: continue
             load[p] = (load[p] ?: 0) + 1

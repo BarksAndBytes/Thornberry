@@ -61,6 +61,7 @@ object Node {
             dir = ctx.filesDir
             prefs = ctx.getSharedPreferences("share", Context.MODE_PRIVATE)
             ChatLog.init(ctx)
+            Files.init(ctx)
             selfTest = SelfTest.run()
             ChatLog.log("START", "selfTest=$selfTest")
             try {
@@ -130,6 +131,14 @@ object Node {
                     is ChatEngine.Event.LocationUpdate -> if (ev.sender != meHex) geoSenders.add(ev.sender)
                     is ChatEngine.Event.SharingState -> {}
                     is ChatEngine.Event.PlacesChanged -> placesChanged = true
+                    is ChatEngine.Event.FileControl -> {
+                        val r = Files.onControl(e, ev.contactId, ev.body, System.currentTimeMillis())
+                        for ((cid, body) in r.replies) try { e.sendFileControl(cid, body) } catch (_: Exception) {}
+                        r.history?.let { addMsg(it); notifyHook?.invoke("New file") }
+                    }
+                    is ChatEngine.Event.GroupFile -> {
+                        if (ev.sender != meHex) Files.onGroupOffer(ev.groupId, ev.sender, ev.body, ev.timestamp)?.let { addMsg(it); notifyHook?.invoke("New file in a group") }
+                    }
                     is ChatEngine.Event.Paired -> {
                         ChatLog.log("PAIRED_BY_RESPONSE")
                         e.contact(ev.contactId)?.let { pendingPairing = ChatEngine.PairingResult(it, ev.safetyCode) }
