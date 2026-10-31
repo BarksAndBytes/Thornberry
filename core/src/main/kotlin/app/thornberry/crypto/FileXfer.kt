@@ -287,7 +287,8 @@ class Swarm(val chunks: Int, val manifestParts: Int, val perPeer: Int = 12, val 
         } else {
             for (i in 0 until chunks) if (wanted[i] && !have[i] && !inflight.containsKey(i)) needed.add(i)
         }
-        var rr = 0
+        // Start at a different peer each second, so a peer that cannot help is not asked first forever.
+        var rr = ((now / 1000) % peers.size).toInt()
         for (i in needed) {
             var chosen: String? = null
             // Prefer peers known to have the piece; then peers that might (unknown, or fetching it).
