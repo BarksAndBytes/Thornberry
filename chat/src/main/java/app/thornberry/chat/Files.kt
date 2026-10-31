@@ -6,6 +6,7 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import app.thornberry.crypto.Bits
 import app.thornberry.crypto.ChatEngine
+import app.thornberry.crypto.Crypto
 import app.thornberry.crypto.FileXfer
 import app.thornberry.crypto.Swarm
 import java.io.ByteArrayInputStream
@@ -186,7 +187,7 @@ object Files {
                     }
                 } ?: throw IllegalStateException("could not open the file")
                 val manifest = mb.done()
-                val offer = FileXfer.Offer(id, name, mime, size, key, app.thornberry.crypto.Crypto.sha256(manifest))
+                val offer = FileXfer.Offer(id, name, mime, size, key, Crypto.sha256(manifest))
                 val done = T(offer, conv, "me", true, ST_SHARED, uri.toString(), System.currentTimeMillis())
                 done.manifest = manifest
                 for (i in 0 until offer.chunks) done.have.set(i)
